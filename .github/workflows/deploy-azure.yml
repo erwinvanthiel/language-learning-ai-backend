@@ -4,10 +4,11 @@ on:
   push:
     branches:
       - main
+      - dev
   workflow_dispatch:
 
 concurrency:
-  group: azure-app-service-production
+  group: azure-app-service-${{ github.ref_name }}
   cancel-in-progress: false
 
 permissions:
@@ -84,7 +85,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment:
-      name: production
+      name: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
       url: ${{ steps.deploy.outputs.webapp-url }}
     permissions:
       contents: read
@@ -108,6 +109,6 @@ jobs:
         id: deploy
         uses: azure/webapps-deploy@v3
         with:
-          app-name: ${{ vars.AZURE_WEBAPP_NAME }}
+          app-name: ${{ github.ref_name == 'main' && vars.AZURE_WEBAPP_NAME || vars.AZURE_DEV_WEBAPP_NAME }}
           package: deployment
           startup-command: PYTHONPATH=/home/site/wwwroot/.python_packages/lib/site-packages python -m uvicorn main:app --host 0.0.0.0 --port 8000
