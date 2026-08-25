@@ -19,6 +19,25 @@ Open <http://127.0.0.1:8000/> to receive:
 
 Interactive API documentation is available at <http://127.0.0.1:8000/docs>.
 
+## Generate a language-learning response
+
+`POST /generate` accepts a JSON context dictionary and forwards it to the configured
+Azure OpenAI model deployment:
+
+```json
+{
+  "context": {
+    "text": "Help me practise ordering coffee in Dutch"
+  }
+}
+```
+
+The response is returned as `{"response": "..."}`. The server uses Microsoft Entra
+authentication through `DefaultAzureCredential`; configure `AZURE_OPENAI_ENDPOINT`
+and `AZURE_OPENAI_DEPLOYMENT` in the environment. In Azure, give the App Service's
+managed identity the `Cognitive Services OpenAI User` role on the Azure OpenAI
+resource.
+
 ## Continuous deployment to Azure App Service
 
 Pull requests targeting `main` run a compile check and start the API for a smoke

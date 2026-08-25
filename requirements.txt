@@ -1,2 +1,4 @@
+azure-identity>=1.25,<2
 fastapi
+openai>=2,<3
 uvicorn[standard]
