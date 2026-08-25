@@ -64,6 +64,10 @@ jobs:
           cp main.py requirements.txt deployment/
           python -m pip install \
             --requirement requirements.txt \
+            --platform manylinux2014_x86_64 \
+            --implementation cp \
+            --python-version "${PYTHON_VERSION}" \
+            --only-binary=:all: \
             --target deployment/.python_packages/lib/site-packages
 
       - name: Upload deployment package
