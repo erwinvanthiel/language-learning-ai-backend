@@ -40,19 +40,24 @@ resource.
 
 ## Continuous deployment to Azure App Service
 
-Pull requests targeting `main` run a compile check and start the API for a smoke
-test. A merge to `main` repeats those checks, packages the application and its
-Python dependencies, and deploys it to a Linux Azure App Service.
+Pull requests targeting `dev` or `main` run a compile check and start the API for
+a smoke test. A merge to either branch repeats those checks and packages the
+application and its Python dependencies. The `dev` branch deploys to
+`language-learning-ai-api-dev-evth`; `main` deploys to the production App Service.
 
 The deployment uses GitHub's OpenID Connect integration, so it does not require a
 long-lived Azure publish profile. Before merging the deployment workflow, create:
 
-- A GitHub environment named `production`.
+- GitHub environments named `staging` and `production`.
 - A repository variable named `AZURE_WEBAPP_NAME` containing the App Service name.
-- Repository or `production` environment secrets named `AZURE_CLIENT_ID`,
+- A repository variable named `AZURE_DEV_WEBAPP_NAME` containing the staging Web
+  App name.
+- Repository or environment secrets named `AZURE_CLIENT_ID`,
   `AZURE_TENANT_ID`, and `AZURE_SUBSCRIPTION_ID`.
 - A federated credential in Microsoft Entra ID with this subject:
   `repo:<github-owner>/<github-repository>:environment:production`.
+- A second federated credential with the subject:
+  `repo:<github-owner>/<github-repository>:environment:staging`.
 - A role assignment granting that identity `Website Contributor` on the target
   App Service.
 
