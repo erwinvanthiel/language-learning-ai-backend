@@ -19,10 +19,23 @@ Open <http://127.0.0.1:8000/> to receive:
 
 Interactive API documentation is available at <http://127.0.0.1:8000/docs>.
 
+## Authentication and message storage
+
+`GET /messages` and `POST /generate` require a Google ID token in the
+`Authorization: Bearer <token>` header. The API validates the token signature,
+expiry, and audience against `GOOGLE_CLIENT_ID` and uses Google's stable `sub`
+claim as the user ID. It does not store names, email addresses, or OAuth tokens.
+
+The API registers verified user IDs in the `Users` Azure Table and stores their
+prompts in the `Messages` table. Configure `AZURE_TABLE_ENDPOINT` and grant the
+App Service managed identity `Storage Table Data Contributor` on the storage
+account. `GET /messages` returns up to the authenticated user's 100 most recent
+prompts.
+
 ## Generate a language-learning response
 
-`POST /generate` accepts a JSON context dictionary and forwards it to the configured
-Azure OpenAI model deployment:
+`POST /generate` accepts a JSON context dictionary, stores its message for the
+authenticated user, and forwards it to the configured Azure OpenAI model deployment:
 
 ```json
 {
