@@ -103,4 +103,4 @@ jobs:
         with:
           app-name: ${{ vars.AZURE_WEBAPP_NAME }}
           package: deployment
-          startup-command: python -m uvicorn main:app --host 0.0.0.0 --port 8000
+          startup-command: PYTHONPATH=/home/site/wwwroot/.python_packages/lib/site-packages python -m uvicorn main:app --host 0.0.0.0 --port 8000
