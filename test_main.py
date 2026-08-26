@@ -86,8 +86,11 @@ def test_read_and_update_language_settings(monkeypatch) -> None:
                 raise error
             return entities[row_key]
 
-        def upsert_entity(self, entity):
-            entities[entity["RowKey"]] = entity
+        def upsert_entity(self, entity, mode=None):
+            entities[entity["RowKey"]] = {
+                **entities.get(entity["RowKey"], {}),
+                **entity,
+            }
 
     class FakeTableService:
         def get_table_client(self, table_name):
