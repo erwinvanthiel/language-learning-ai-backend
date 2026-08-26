@@ -156,6 +156,7 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "https://yellow-coast-0325af203.7.azurestaticapps.net",
+        "https://yellow-coast-0325af203-dev.westeurope.7.azurestaticapps.net",
     ],
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
