@@ -2,7 +2,7 @@ import json
 import os
 from datetime import datetime, timezone
 from functools import lru_cache
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import uuid4
 
 from azure.core.exceptions import HttpResponseError
@@ -30,6 +30,7 @@ class GenerateResponse(BaseModel):
 
 class StoredMessage(BaseModel):
     id: str
+    role: Literal["user", "assistant"]
     text: str
     created_at: str
 
@@ -87,22 +88,27 @@ def store_user(user_id: str) -> None:
     )
 
 
-def store_message(user_id: str, text: str) -> None:
+def store_message(user_id: str, text: str, role: Literal["user", "assistant"] = "user") -> None:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     get_table_service_client().get_table_client("Messages").create_entity(
         {
             "PartitionKey": user_id,
             "RowKey": f"{timestamp}_{uuid4().hex}",
+            "Role": role,
             "Text": text,
         }
     )
 
 
-def register_user_and_message(user_id: str, text: str | None = None) -> None:
+def register_user_and_message(
+    user_id: str,
+    text: str | None = None,
+    role: Literal["user", "assistant"] = "user",
+) -> None:
     try:
         store_user(user_id)
         if text is not None:
-            store_message(user_id, text)
+            store_message(user_id, text, role)
     except (HttpResponseError, KeyError) as error:
         raise HTTPException(status_code=503, detail="Message storage is unavailable.") from error
 
@@ -140,6 +146,7 @@ def read_messages(user_id: Annotated[str, Depends(get_current_user)]) -> list[St
     return [
         StoredMessage(
             id=entity["RowKey"],
+            role=entity.get("Role", "user"),
             text=entity["Text"],
             created_at=entity["RowKey"].split("_", 1)[0],
         )
@@ -159,7 +166,7 @@ def generate(
     message_text = request.context.get("text")
     if not isinstance(message_text, str):
         message_text = json.dumps(request.context, ensure_ascii=False)
-    register_user_and_message(user_id, message_text)
+    register_user_and_message(user_id, message_text, "user")
 
     try:
         result = get_openai_client().responses.create(
@@ -177,4 +184,5 @@ def generate(
             detail="Azure OpenAI could not generate a response.",
         ) from error
 
+    register_user_and_message(user_id, result.output_text, "assistant")
     return GenerateResponse(response=result.output_text)
