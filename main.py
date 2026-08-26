@@ -6,7 +6,7 @@ from typing import Annotated, Any, Literal
 from uuid import uuid4
 
 from azure.core.exceptions import HttpResponseError
-from azure.data.tables import TableServiceClient
+from azure.data.tables import TableServiceClient, UpdateMode
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from fastapi import Depends
 from fastapi import FastAPI
@@ -89,7 +89,7 @@ def get_current_user(
 
 def store_user(user_id: str) -> None:
     get_table_service_client().get_table_client("Users").upsert_entity(
-        {"PartitionKey": "google", "RowKey": user_id}
+        {"PartitionKey": "google", "RowKey": user_id}, mode=UpdateMode.MERGE
     )
 
 
