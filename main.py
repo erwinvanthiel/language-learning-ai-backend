@@ -6,7 +6,7 @@ from typing import Annotated, Any, Literal
 from uuid import uuid4
 
 from azure.core.exceptions import HttpResponseError
-from azure.data.tables import TableServiceClient
+from azure.data.tables import TableServiceClient, UpdateMode
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from fastapi import Depends
 from fastapi import FastAPI
@@ -22,6 +22,11 @@ from pydantic import BaseModel, Field
 
 class GenerateRequest(BaseModel):
     context: dict[str, Any] = Field(description="Context forwarded to Azure OpenAI")
+
+
+class LanguageSettings(BaseModel):
+    native_language: str = Field(default="English", min_length=1, max_length=80)
+    learning_language: str = Field(default="Dutch", min_length=1, max_length=80)
 
 
 class GenerateResponse(BaseModel):
@@ -84,8 +89,39 @@ def get_current_user(
 
 def store_user(user_id: str) -> None:
     get_table_service_client().get_table_client("Users").upsert_entity(
-        {"PartitionKey": "google", "RowKey": user_id}
+        {"PartitionKey": "google", "RowKey": user_id}, mode=UpdateMode.MERGE
     )
+
+
+def get_language_settings(user_id: str) -> LanguageSettings:
+    try:
+        entity = get_table_service_client().get_table_client("Users").get_entity(
+            partition_key="google", row_key=user_id
+        )
+    except Exception as error:
+        if getattr(error, "status_code", None) == 404:
+            return LanguageSettings()
+        if isinstance(error, (HttpResponseError, KeyError)):
+            raise HTTPException(status_code=503, detail="User settings are unavailable.") from error
+        raise
+    return LanguageSettings(
+        native_language=entity.get("NativeLanguage", "English"),
+        learning_language=entity.get("LearningLanguage", "Dutch"),
+    )
+
+
+def save_language_settings(user_id: str, settings: LanguageSettings) -> None:
+    try:
+        get_table_service_client().get_table_client("Users").upsert_entity(
+            {
+                "PartitionKey": "google",
+                "RowKey": user_id,
+                "NativeLanguage": settings.native_language,
+                "LearningLanguage": settings.learning_language,
+            }
+        )
+    except (HttpResponseError, KeyError) as error:
+        raise HTTPException(status_code=503, detail="User settings are unavailable.") from error
 
 
 def store_message(user_id: str, text: str, role: Literal["user", "assistant"] = "user") -> None:
@@ -120,6 +156,7 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "https://yellow-coast-0325af203.7.azurestaticapps.net",
+        "https://yellow-coast-0325af203-dev.westeurope.7.azurestaticapps.net",
     ],
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
@@ -154,6 +191,21 @@ def read_messages(user_id: Annotated[str, Depends(get_current_user)]) -> list[St
     ]
 
 
+@app.get("/settings", response_model=LanguageSettings)
+def read_settings(user_id: Annotated[str, Depends(get_current_user)]) -> LanguageSettings:
+    register_user_and_message(user_id)
+    return get_language_settings(user_id)
+
+
+@app.put("/settings", response_model=LanguageSettings)
+def update_settings(
+    settings: LanguageSettings,
+    user_id: Annotated[str, Depends(get_current_user)],
+) -> LanguageSettings:
+    save_language_settings(user_id, settings)
+    return settings
+
+
 @app.post("/generate", response_model=GenerateResponse)
 def generate(
     request: GenerateRequest,
@@ -167,13 +219,16 @@ def generate(
     if not isinstance(message_text, str):
         message_text = json.dumps(request.context, ensure_ascii=False)
     register_user_and_message(user_id, message_text, "user")
+    settings = get_language_settings(user_id)
 
     try:
         result = get_openai_client().responses.create(
             model=deployment,
             instructions=(
                 "You are a helpful language-learning assistant. Use the supplied "
-                "context to give a clear and concise response."
+                "context to give a clear and concise response. The user's native "
+                f"language is {settings.native_language}; respond in {settings.learning_language} "
+                "unless the user explicitly asks for another language."
             ),
             input=json.dumps(request.context, ensure_ascii=False),
             max_output_tokens=1000,

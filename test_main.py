@@ -42,6 +42,13 @@ def test_generate_relays_context_and_returns_response(monkeypatch) -> None:
     monkeypatch.setattr(main, "get_openai_client", lambda: fake_client)
     monkeypatch.setattr(
         main,
+        "get_language_settings",
+        lambda user_id: main.LanguageSettings(
+            native_language="English", learning_language="German"
+        ),
+    )
+    monkeypatch.setattr(
+        main,
         "register_user_and_message",
         lambda user_id, text=None, role="user": stored_messages.append(
             (user_id, text, role)
@@ -56,6 +63,7 @@ def test_generate_relays_context_and_returns_response(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json() == {"response": "Hallo!"}
     assert fake_client.responses.request["model"] == "test-deployment"
+    assert "respond in German" in fake_client.responses.request["instructions"]
     assert json.loads(fake_client.responses.request["input"]) == {
         "text": "Help me practise German",
         "level": "A2",
@@ -64,6 +72,45 @@ def test_generate_relays_context_and_returns_response(monkeypatch) -> None:
         ("google-user-123", "Help me practise German", "user"),
         ("google-user-123", "Hallo!", "assistant"),
     ]
+
+
+def test_read_and_update_language_settings(monkeypatch) -> None:
+    entities = {}
+
+    class FakeUsersTable:
+        def get_entity(self, partition_key, row_key):
+            assert partition_key == "google"
+            if row_key not in entities:
+                error = RuntimeError("not found")
+                error.status_code = 404
+                raise error
+            return entities[row_key]
+
+        def upsert_entity(self, entity, mode=None):
+            entities[entity["RowKey"]] = {
+                **entities.get(entity["RowKey"], {}),
+                **entity,
+            }
+
+    class FakeTableService:
+        def get_table_client(self, table_name):
+            assert table_name == "Users"
+            return FakeUsersTable()
+
+    monkeypatch.setattr(main, "get_table_service_client", lambda: FakeTableService())
+    client = TestClient(main.app)
+
+    response = client.get("/settings")
+    assert response.status_code == 200
+    assert response.json() == {"native_language": "English", "learning_language": "Dutch"}
+
+    response = client.put(
+        "/settings",
+        json={"native_language": "English", "learning_language": "German"},
+    )
+    assert response.status_code == 200
+    assert response.json()["learning_language"] == "German"
+    assert client.get("/settings").json()["learning_language"] == "German"
 
 
 def test_generate_requires_azure_openai_configuration(monkeypatch) -> None:
