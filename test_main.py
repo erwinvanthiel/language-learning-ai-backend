@@ -43,7 +43,9 @@ def test_generate_relays_context_and_returns_response(monkeypatch) -> None:
     monkeypatch.setattr(
         main,
         "register_user_and_message",
-        lambda user_id, text=None: stored_messages.append((user_id, text)),
+        lambda user_id, text=None, role="user": stored_messages.append(
+            (user_id, text, role)
+        ),
     )
 
     response = TestClient(main.app).post(
@@ -58,7 +60,10 @@ def test_generate_relays_context_and_returns_response(monkeypatch) -> None:
         "text": "Help me practise German",
         "level": "A2",
     }
-    assert stored_messages == [("google-user-123", "Help me practise German")]
+    assert stored_messages == [
+        ("google-user-123", "Help me practise German", "user"),
+        ("google-user-123", "Hallo!", "assistant"),
+    ]
 
 
 def test_generate_requires_azure_openai_configuration(monkeypatch) -> None:
@@ -109,6 +114,13 @@ def test_read_messages_returns_only_authenticated_users_messages(monkeypatch) ->
                     "PartitionKey": "google-user-123",
                     "RowKey": "20260825T120000.000000Z_first",
                     "Text": "Goedemorgen",
+                    "Role": "user",
+                },
+                {
+                    "PartitionKey": "google-user-123",
+                    "RowKey": "20260825T120001.000000Z_second",
+                    "Text": "Good morning!",
+                    "Role": "assistant",
                 }
             ]
 
@@ -126,7 +138,14 @@ def test_read_messages_returns_only_authenticated_users_messages(monkeypatch) ->
     assert response.json() == [
         {
             "id": "20260825T120000.000000Z_first",
+            "role": "user",
             "text": "Goedemorgen",
             "created_at": "20260825T120000.000000Z",
+        },
+        {
+            "id": "20260825T120001.000000Z_second",
+            "role": "assistant",
+            "text": "Good morning!",
+            "created_at": "20260825T120001.000000Z",
         }
     ]
