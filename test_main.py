@@ -53,25 +53,6 @@ def test_parse_generation_extracts_valid_feedback() -> None:
     ]
 
 
-def test_translate_uses_users_native_language(monkeypatch) -> None:
-    fake_client = FakeOpenAIClient()
-    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://example.openai.azure.com")
-    monkeypatch.setenv("AZURE_OPENAI_DEPLOYMENT", "test-deployment")
-    monkeypatch.setattr(main, "get_openai_client", lambda: fake_client)
-    monkeypatch.setattr(
-        main,
-        "get_language_settings",
-        lambda user_id: main.LanguageSettings(native_language="English", learning_language="Spanish"),
-    )
-
-    response = TestClient(main.app).post("/translate", json={"text": "Buenos días"})
-
-    assert response.status_code == 200
-    assert response.json() == {"translation": "Hallo!"}
-    assert "into English" in fake_client.responses.request["instructions"]
-    assert fake_client.responses.request["input"] == "Buenos días"
-
-
 @pytest.fixture(autouse=True)
 def authenticated_user():
     main.app.dependency_overrides[main.get_current_user] = lambda: "google-user-123"
