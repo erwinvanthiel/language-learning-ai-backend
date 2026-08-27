@@ -53,6 +53,11 @@ class TranslateResponse(BaseModel):
     translation: str
 
 
+class PushSubscription(BaseModel):
+    endpoint: str = Field(min_length=1, max_length=2000)
+    keys: dict[str, str]
+
+
 class StoredMessage(BaseModel):
     id: str
     role: Literal["user", "assistant"]
@@ -112,6 +117,16 @@ def store_user(user_id: str) -> None:
     get_table_service_client().get_table_client("Users").upsert_entity(
         {"PartitionKey": "google", "RowKey": user_id}, mode=UpdateMode.MERGE
     )
+
+
+def store_push_subscription(user_id: str, subscription: PushSubscription | None) -> None:
+    table = get_table_service_client().get_table_client("Users")
+    entity = table.get_entity(partition_key="google", row_key=user_id)
+    if subscription is None:
+        entity.pop("PushSubscription", None)
+    else:
+        entity["PushSubscription"] = json.dumps(subscription.model_dump())
+    table.upsert_entity(entity, mode=UpdateMode.REPLACE)
 
 
 def get_language_settings(user_id: str) -> LanguageSettings:
@@ -367,6 +382,37 @@ def delete_messages(user_id: Annotated[str, Depends(get_current_user)]) -> dict[
     except (HttpResponseError, KeyError) as error:
         raise HTTPException(status_code=503, detail="Message storage is unavailable.") from error
     return {"deleted": len(entities)}
+
+
+@app.get("/push/vapid-public-key")
+def read_vapid_public_key() -> dict[str, str]:
+    public_key = os.getenv("VAPID_PUBLIC_KEY")
+    if not public_key:
+        raise HTTPException(status_code=503, detail="Push notifications are not configured.")
+    return {"publicKey": public_key}
+
+
+@app.put("/push/subscription")
+def save_push_subscription(
+    subscription: PushSubscription,
+    user_id: Annotated[str, Depends(get_current_user)],
+) -> dict[str, bool]:
+    try:
+        register_user_and_message(user_id)
+        store_push_subscription(user_id, subscription)
+    except (HttpResponseError, KeyError) as error:
+        raise HTTPException(status_code=503, detail="Push subscription storage is unavailable.") from error
+    return {"subscribed": True}
+
+
+@app.delete("/push/subscription")
+def delete_push_subscription(user_id: Annotated[str, Depends(get_current_user)]) -> dict[str, bool]:
+    try:
+        register_user_and_message(user_id)
+        store_push_subscription(user_id, None)
+    except (HttpResponseError, KeyError) as error:
+        raise HTTPException(status_code=503, detail="Push subscription storage is unavailable.") from error
+    return {"subscribed": False}
 
 
 @app.post("/generate", response_model=GenerateResponse)

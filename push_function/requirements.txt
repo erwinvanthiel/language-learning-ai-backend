@@ -1,0 +1,5 @@
+azure-functions>=1.24,<2
+azure-data-tables>=12.7,<13
+azure-identity>=1.25,<2
+azure-servicebus>=7.14,<8
+pywebpush>=2.0,<3
