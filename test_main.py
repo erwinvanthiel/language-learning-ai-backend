@@ -75,7 +75,10 @@ def test_generate_relays_context_and_returns_response(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json() == {"response": "Hallo!", "feedback": []}
     assert fake_client.responses.request["model"] == "test-deployment"
-    assert "respond in German" in fake_client.responses.request["instructions"]
+    assert "neutral conversational AI" in fake_client.responses.request["instructions"]
+    assert "My language: English" in fake_client.responses.request["instructions"]
+    assert "learning language: German" in fake_client.responses.request["instructions"]
+    assert "conversation response should be in the learning language: German" in fake_client.responses.request["instructions"]
     assert json.loads(fake_client.responses.request["input"]) == {
         "text": "Help me practise German",
         "level": "A2",
