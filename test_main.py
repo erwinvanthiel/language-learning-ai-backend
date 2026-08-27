@@ -20,6 +20,18 @@ class FakeOpenAIClient:
         self.responses = FakeResponses()
 
 
+def test_parse_generation_extracts_valid_feedback() -> None:
+    response, feedback = main.parse_generation(
+        '{"response":"¡Hola!","feedback":[{"start":0,"end":4,"comment":"Cambia esto."}]}',
+        "Ola mundo",
+    )
+
+    assert response == "¡Hola!"
+    assert [item.model_dump() for item in feedback] == [
+        {"start": 0, "end": 4, "comment": "Cambia esto."}
+    ]
+
+
 @pytest.fixture(autouse=True)
 def authenticated_user():
     main.app.dependency_overrides[main.get_current_user] = lambda: "google-user-123"
@@ -50,8 +62,8 @@ def test_generate_relays_context_and_returns_response(monkeypatch) -> None:
     monkeypatch.setattr(
         main,
         "register_user_and_message",
-        lambda user_id, text=None, role="user": stored_messages.append(
-            (user_id, text, role)
+        lambda user_id, text=None, role="user", feedback=None: stored_messages.append(
+            (user_id, text, role, feedback)
         ),
     )
 
@@ -61,16 +73,19 @@ def test_generate_relays_context_and_returns_response(monkeypatch) -> None:
     )
 
     assert response.status_code == 200
-    assert response.json() == {"response": "Hallo!"}
+    assert response.json() == {"response": "Hallo!", "feedback": []}
     assert fake_client.responses.request["model"] == "test-deployment"
-    assert "respond in German" in fake_client.responses.request["instructions"]
+    assert "neutral conversational AI" in fake_client.responses.request["instructions"]
+    assert "My language: English" in fake_client.responses.request["instructions"]
+    assert "learning language: German" in fake_client.responses.request["instructions"]
+    assert "conversation response should be in the learning language: German" in fake_client.responses.request["instructions"]
     assert json.loads(fake_client.responses.request["input"]) == {
         "text": "Help me practise German",
         "level": "A2",
     }
     assert stored_messages == [
-        ("google-user-123", "Help me practise German", "user"),
-        ("google-user-123", "Hallo!", "assistant"),
+        ("google-user-123", "Help me practise German", "user", None),
+        ("google-user-123", "Hallo!", "assistant", []),
     ]
 
 
@@ -188,11 +203,13 @@ def test_read_messages_returns_only_authenticated_users_messages(monkeypatch) ->
             "role": "user",
             "text": "Goedemorgen",
             "created_at": "20260825T120000.000000Z",
+            "feedback": [],
         },
         {
             "id": "20260825T120001.000000Z_second",
             "role": "assistant",
             "text": "Good morning!",
             "created_at": "20260825T120001.000000Z",
+            "feedback": [],
         }
     ]

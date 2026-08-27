@@ -29,8 +29,15 @@ class LanguageSettings(BaseModel):
     learning_language: str = Field(default="Dutch", min_length=1, max_length=80)
 
 
+class FeedbackAnnotation(BaseModel):
+    start: int = Field(ge=0)
+    end: int = Field(gt=0)
+    comment: str = Field(min_length=1, max_length=500)
+
+
 class GenerateResponse(BaseModel):
     response: str
+    feedback: list[FeedbackAnnotation] = Field(default_factory=list)
 
 
 class StoredMessage(BaseModel):
@@ -38,6 +45,7 @@ class StoredMessage(BaseModel):
     role: Literal["user", "assistant"]
     text: str
     created_at: str
+    feedback: list[FeedbackAnnotation] = Field(default_factory=list)
 
 
 @lru_cache
@@ -124,7 +132,12 @@ def save_language_settings(user_id: str, settings: LanguageSettings) -> None:
         raise HTTPException(status_code=503, detail="User settings are unavailable.") from error
 
 
-def store_message(user_id: str, text: str, role: Literal["user", "assistant"] = "user") -> None:
+def store_message(
+    user_id: str,
+    text: str,
+    role: Literal["user", "assistant"] = "user",
+    feedback: list[FeedbackAnnotation] | None = None,
+) -> None:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     get_table_service_client().get_table_client("Messages").create_entity(
         {
@@ -132,6 +145,7 @@ def store_message(user_id: str, text: str, role: Literal["user", "assistant"] = 
             "RowKey": f"{timestamp}_{uuid4().hex}",
             "Role": role,
             "Text": text,
+            **({"Feedback": json.dumps([item.model_dump() for item in feedback])} if feedback else {}),
         }
     )
 
@@ -140,11 +154,12 @@ def register_user_and_message(
     user_id: str,
     text: str | None = None,
     role: Literal["user", "assistant"] = "user",
+    feedback: list[FeedbackAnnotation] | None = None,
 ) -> None:
     try:
         store_user(user_id)
         if text is not None:
-            store_message(user_id, text, role)
+            store_message(user_id, text, role, feedback)
     except (HttpResponseError, KeyError) as error:
         raise HTTPException(status_code=503, detail="Message storage is unavailable.") from error
 
@@ -180,15 +195,45 @@ def read_messages(user_id: Annotated[str, Depends(get_current_user)]) -> list[St
     except (HttpResponseError, KeyError) as error:
         raise HTTPException(status_code=503, detail="Message storage is unavailable.") from error
 
-    return [
-        StoredMessage(
-            id=entity["RowKey"],
-            role=entity.get("Role", "user"),
-            text=entity["Text"],
-            created_at=entity["RowKey"].split("_", 1)[0],
+    messages = []
+    for entity in sorted(entities, key=lambda item: item["RowKey"])[-100:]:
+        feedback = []
+        if entity.get("Feedback"):
+            try:
+                feedback = [FeedbackAnnotation.model_validate(item) for item in json.loads(entity["Feedback"])]
+            except (TypeError, ValueError):
+                feedback = []
+        messages.append(
+            StoredMessage(
+                id=entity["RowKey"],
+                role=entity.get("Role", "user"),
+                text=entity["Text"],
+                created_at=entity["RowKey"].split("_", 1)[0],
+                feedback=feedback,
+            )
         )
-        for entity in sorted(entities, key=lambda item: item["RowKey"])[-100:]
-    ]
+    return messages
+
+
+def parse_generation(output: str, message_text: str) -> tuple[str, list[FeedbackAnnotation]]:
+    """Parse structured teacher feedback, falling back safely for plain model output."""
+    try:
+        candidate = output.strip()
+        if candidate.startswith("```"):
+            candidate = candidate.strip("`").removeprefix("json").strip()
+        payload = json.loads(candidate)
+        response = payload.get("response") or payload.get("reply")
+        raw_feedback = payload.get("feedback", [])
+        if not isinstance(response, str) or not isinstance(raw_feedback, list):
+            raise ValueError("Invalid generation payload")
+        feedback = []
+        for item in raw_feedback:
+            annotation = FeedbackAnnotation.model_validate(item)
+            if annotation.end <= len(message_text) and annotation.start < annotation.end:
+                feedback.append(annotation)
+        return response, sorted(feedback, key=lambda item: (item.start, item.end))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return output, []
 
 
 @app.get("/settings", response_model=LanguageSettings)
@@ -225,9 +270,18 @@ def generate(
         result = get_openai_client().responses.create(
             model=deployment,
             instructions=(
-                "You are a helpful language-learning assistant. Use the supplied "
-                "context to give a clear and concise response. The user's native "
-                f"language is {settings.native_language}; respond in {settings.learning_language} "
+                "You are a neutral conversational AI. Respond naturally to the user's "
+                "message without taking on a teacher, tutor, coach, or evaluator role. "
+                "Use the supplied context to give a clear and concise response. Return "
+                "ONLY valid JSON "
+                "with keys `response` (your answer) and `feedback` (an array of objects "
+                "with integer `start`, integer `end`, and `comment`). The feedback "
+                "spans must identify only genuine mistakes in the user's message, using "
+                "character offsets. If there are no mistakes, return an empty feedback "
+                "array. Ignore words or passages written in languages other than the "
+                "learning language. The correction comments are the only teacher-like "
+                f"content and must be written entirely in the user's My language: {settings.native_language}. "
+                f"The conversation response should be in the learning language: {settings.learning_language} "
                 "unless the user explicitly asks for another language."
             ),
             input=json.dumps(request.context, ensure_ascii=False),
@@ -239,5 +293,6 @@ def generate(
             detail="Azure OpenAI could not generate a response.",
         ) from error
 
-    register_user_and_message(user_id, result.output_text, "assistant")
-    return GenerateResponse(response=result.output_text)
+    response_text, feedback = parse_generation(result.output_text, message_text)
+    register_user_and_message(user_id, response_text, "assistant", feedback)
+    return GenerateResponse(response=response_text, feedback=feedback)
