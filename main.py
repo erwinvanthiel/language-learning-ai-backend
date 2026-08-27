@@ -293,11 +293,32 @@ def translate(
         translation = response.json().get("translatedText")
         if not isinstance(translation, str):
             raise ValueError("LibreTranslate returned no translated text")
-    except (httpx.HTTPError, ValueError, KeyError) as error:
-        raise HTTPException(
-            status_code=502,
-            detail="LibreTranslate could not translate the selected text.",
-        ) from error
+    except (httpx.HTTPError, ValueError, KeyError):
+        # Public LibreTranslate instances can be unavailable or rate-limited.
+        # Fall back to the already configured Azure OpenAI deployment so the
+        # user still receives a translation instead of an opaque 502.
+        deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+        if not deployment or not os.getenv("AZURE_OPENAI_ENDPOINT"):
+            raise HTTPException(
+                status_code=502,
+                detail="Translation service is temporarily unavailable.",
+            )
+        try:
+            result = get_openai_client().responses.create(
+                model=deployment,
+                instructions=(
+                    f"Translate the supplied text into {settings.native_language}. "
+                    "Return only the translation, with no explanation or quotation marks."
+                ),
+                input=request.text,
+                max_output_tokens=500,
+            )
+            translation = result.output_text
+        except (OpenAIError, AttributeError) as error:
+            raise HTTPException(
+                status_code=502,
+                detail="Translation services are temporarily unavailable.",
+            ) from error
     return TranslateResponse(translation=translation.strip())
 
 
