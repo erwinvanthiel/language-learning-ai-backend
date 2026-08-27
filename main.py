@@ -348,33 +348,6 @@ def delete_messages(user_id: Annotated[str, Depends(get_current_user)]) -> dict[
     return {"deleted": len(entities)}
 
 
-@app.post("/translate", response_model=TranslateResponse)
-def translate(
-    request: TranslateRequest,
-    user_id: Annotated[str, Depends(get_current_user)],
-) -> TranslateResponse:
-    deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT")
-    if not deployment or not os.getenv("AZURE_OPENAI_ENDPOINT"):
-        raise HTTPException(status_code=503, detail="Azure OpenAI is not configured.")
-    settings = get_language_settings(user_id)
-    try:
-        result = get_openai_client().responses.create(
-            model=deployment,
-            instructions=(
-                f"Translate the supplied text into {settings.native_language}. "
-                "Return only the translation, with no explanation or quotation marks."
-            ),
-            input=request.text,
-            max_output_tokens=500,
-        )
-    except OpenAIError as error:
-        raise HTTPException(
-            status_code=502,
-            detail="Azure OpenAI could not translate the selected text.",
-        ) from error
-    return TranslateResponse(translation=result.output_text.strip())
-
-
 @app.post("/generate", response_model=GenerateResponse)
 def generate(
     request: GenerateRequest,
