@@ -33,6 +33,12 @@ class LanguageSettings(BaseModel):
     sanitized_persona: str = Field(default="", max_length=500, exclude=True)
 
 
+class FeedbackAnnotation(BaseModel):
+    start: int = Field(ge=0)
+    end: int = Field(gt=0)
+    comment: str = Field(min_length=1, max_length=500)
+
+
 class GenerateResponse(BaseModel):
     response: str
     feedback: list[FeedbackAnnotation] = Field(default_factory=list)
