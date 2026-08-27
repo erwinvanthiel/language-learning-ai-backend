@@ -20,6 +20,46 @@ class FakeOpenAIClient:
         self.responses = FakeResponses()
 
 
+def test_translate_uses_libretranslate_and_native_language(monkeypatch) -> None:
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"translatedText": "What is your name?"}
+
+    calls = []
+    monkeypatch.setattr(main.httpx, "post", lambda *args, **kwargs: (calls.append((args, kwargs)) or FakeResponse()))
+    monkeypatch.setattr(
+        main,
+        "get_language_settings",
+        lambda user_id: main.LanguageSettings(native_language="English", learning_language="Spanish"),
+    )
+    response = TestClient(main.app).post("/translate", json={"text": "¿Cómo te llamas?"})
+    assert response.status_code == 200
+    assert response.json() == {"translation": "What is your name?"}
+    assert calls[0][1]["json"]["target"] == "en"
+
+
+def test_translate_falls_back_to_azure_openai(monkeypatch) -> None:
+    fake_client = FakeOpenAIClient()
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://example.openai.azure.com")
+    monkeypatch.setenv("AZURE_OPENAI_DEPLOYMENT", "test-deployment")
+    monkeypatch.setattr(main, "get_openai_client", lambda: fake_client)
+    monkeypatch.setattr(main.httpx, "post", lambda *args, **kwargs: (_ for _ in ()).throw(main.httpx.ReadTimeout("timed out")))
+    monkeypatch.setattr(
+        main,
+        "get_language_settings",
+        lambda user_id: main.LanguageSettings(native_language="English", learning_language="Spanish"),
+    )
+
+    response = TestClient(main.app).post("/translate", json={"text": "Buenos días"})
+
+    assert response.status_code == 200
+    assert response.json() == {"translation": "Hallo!"}
+    assert "into English" in fake_client.responses.request["instructions"]
+
+
 def test_parse_generation_extracts_valid_feedback() -> None:
     response, feedback = main.parse_generation(
         '{"response":"¡Hola!","feedback":[{"start":0,"end":4,"comment":"Cambia esto."}]}',
