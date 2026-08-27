@@ -1,6 +1,7 @@
 azure-identity>=1.25,<2
 azure-data-tables>=12.7,<13
 fastapi
+httpx
 google-auth>=2.40,<3
 openai>=2,<3
 uvicorn[standard]

@@ -17,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from google.auth.exceptions import GoogleAuthError
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
+import httpx
 from openai import OpenAI, OpenAIError
 from pydantic import BaseModel, Field
 
@@ -266,6 +267,38 @@ def read_messages(user_id: Annotated[str, Depends(get_current_user)]) -> list[St
             )
         )
     return messages
+
+
+@app.post("/translate", response_model=TranslateResponse)
+def translate(
+    request: TranslateRequest,
+    user_id: Annotated[str, Depends(get_current_user)],
+) -> TranslateResponse:
+    settings = get_language_settings(user_id)
+    language_codes = {
+        "english": "en", "dutch": "nl", "german": "de", "french": "fr",
+        "spanish": "es", "italian": "it", "portuguese": "pt",
+    }
+    target = language_codes.get(settings.native_language.lower())
+    if not target:
+        raise HTTPException(status_code=422, detail="Selected language is not supported for translation.")
+    endpoint = os.getenv("LIBRETRANSLATE_URL", "https://libretranslate.com/translate")
+    payload = {"q": request.text, "source": "auto", "target": target, "format": "text"}
+    api_key = os.getenv("LIBRETRANSLATE_API_KEY")
+    if api_key:
+        payload["api_key"] = api_key
+    try:
+        response = httpx.post(endpoint, json=payload, timeout=15)
+        response.raise_for_status()
+        translation = response.json().get("translatedText")
+        if not isinstance(translation, str):
+            raise ValueError("LibreTranslate returned no translated text")
+    except (httpx.HTTPError, ValueError, KeyError) as error:
+        raise HTTPException(
+            status_code=502,
+            detail="LibreTranslate could not translate the selected text.",
+        ) from error
+    return TranslateResponse(translation=translation.strip())
 
 
 def parse_generation(output: str, message_text: str) -> tuple[str, list[FeedbackAnnotation]]:
