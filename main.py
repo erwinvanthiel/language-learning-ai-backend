@@ -270,16 +270,18 @@ def generate(
         result = get_openai_client().responses.create(
             model=deployment,
             instructions=(
-                "You are a helpful language-learning assistant. Use the supplied "
-                "context to give a clear and concise response. Return ONLY valid JSON "
+                "You are a neutral conversational AI. Respond naturally to the user's "
+                "message without taking on a teacher, tutor, coach, or evaluator role. "
+                "Use the supplied context to give a clear and concise response. Return "
+                "ONLY valid JSON "
                 "with keys `response` (your answer) and `feedback` (an array of objects "
                 "with integer `start`, integer `end`, and `comment`). The feedback "
                 "spans must identify only genuine mistakes in the user's message, using "
                 "character offsets. If there are no mistakes, return an empty feedback "
                 "array. Ignore words or passages written in languages other than the "
-                "learning language. Write feedback comments in the user's native language. "
-                "The user's native "
-                f"language is {settings.native_language}; respond in {settings.learning_language} "
+                "learning language. The correction comments are the only teacher-like "
+                f"content and must be written entirely in the user's My language: {settings.native_language}. "
+                f"The conversation response should be in the learning language: {settings.learning_language} "
                 "unless the user explicitly asks for another language."
             ),
             input=json.dumps(request.context, ensure_ascii=False),
