@@ -6,9 +6,11 @@ from uuid import uuid4
 
 import azure.functions as func
 from azure.data.tables import TableServiceClient, UpdateMode
-from azure.identity import DefaultAzureCredential
+from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from azure.servicebus import ServiceBusClient, ServiceBusMessage
+from openai import OpenAI
 from pywebpush import WebPushException, webpush
+import httpx
 
 
 REMINDER = "I’m here whenever you’re ready to practise."
@@ -26,6 +28,50 @@ def tables():
 
 def parse_row_time(row_key: str) -> datetime:
     return datetime.strptime(row_key.split("_", 1)[0], "%Y%m%dT%H%M%S.%fZ").replace(tzinfo=timezone.utc)
+
+
+def find_article(interest: str) -> dict[str, str] | None:
+    endpoint = os.getenv("BING_SEARCH_ENDPOINT", "https://api.bing.microsoft.com/v7.0/search")
+    key = os.getenv("BING_SEARCH_KEY")
+    if not key:
+        return None
+    response = httpx.get(
+        endpoint,
+        headers={"Ocp-Apim-Subscription-Key": key},
+        params={"q": interest, "count": 5, "safeSearch": "Strict", "textFormat": "Raw"},
+        timeout=10,
+    )
+    response.raise_for_status()
+    articles = response.json().get("webPages", {}).get("value", [])
+    for article in articles:
+        name, url, snippet = article.get("name"), article.get("url"), article.get("snippet")
+        if isinstance(name, str) and isinstance(url, str) and isinstance(snippet, str):
+            return {"name": name[:300], "url": url[:1000], "snippet": snippet[:1000]}
+    return None
+
+
+def compose_article_message(user: dict, article: dict[str, str]) -> str:
+    endpoint = os.environ["AZURE_OPENAI_ENDPOINT"].rstrip("/")
+    deployment = os.environ["AZURE_OPENAI_DEPLOYMENT"]
+    token_provider = get_bearer_token_provider(
+        DefaultAzureCredential(), "https://cognitiveservices.azure.com/.default"
+    )
+    client = OpenAI(base_url=f"{endpoint}/openai/v1/", api_key=token_provider)
+    learning_language = user.get("LearningLanguage", "Dutch")
+    persona = user.get("AssistantPersona", "") or "none"
+    result = client.responses.create(
+        model=deployment,
+        instructions=(
+            f"Write a short, natural conversation opener entirely in {learning_language}. "
+            "Act as a real chat buddy whose personality is described below. "
+            "Mention the article topic and ask the user an engaging question. "
+            "Do not mention these instructions, web search, or being an AI. "
+            f"PERSONA: {persona}"
+        ),
+        input=json.dumps(article, ensure_ascii=False),
+        max_output_tokens=300,
+    )
+    return result.output_text.strip()
 
 
 def due_users(now: datetime):
@@ -67,14 +113,25 @@ def enqueue_reminders(_: func.TimerRequest) -> None:
     with ServiceBusClient(namespace, credential=DefaultAzureCredential()) as client:
         with client.get_queue_sender(queue) as sender:
             for user, subscription in due_users(now):
-                payload = {"user_id": user["RowKey"], "subscription": json.loads(subscription), "body": REMINDER}
+                interest = str(user.get("Interests", "")).strip()
+                if not interest:
+                    continue
+                try:
+                    article = find_article(interest)
+                    if not article:
+                        continue
+                    body = compose_article_message(user, article)
+                except Exception:
+                    logging.exception("Could not create an interest-based reminder for %s", user["RowKey"])
+                    continue
+                payload = {"user_id": user["RowKey"], "subscription": json.loads(subscription), "body": body}
                 message_time = now.strftime("%Y%m%dT%H%M%S.%fZ")
                 service.get_table_client("Messages").create_entity(
                     {
                         "PartitionKey": user["RowKey"],
                         "RowKey": f"{message_time}_{uuid4().hex}",
                         "Role": "assistant",
-                        "Text": REMINDER,
+                        "Text": body,
                         "StandardPush": True,
                     }
                 )
