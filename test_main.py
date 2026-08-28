@@ -169,6 +169,7 @@ def test_read_and_update_language_settings(monkeypatch) -> None:
         "native_language": "English",
         "learning_language": "Dutch",
         "assistant_persona": "",
+        "interests": "",
     }
 
     response = client.put(
