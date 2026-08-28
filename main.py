@@ -35,6 +35,7 @@ class LanguageSettings(BaseModel):
     learning_language: str = Field(default="Dutch", min_length=1, max_length=80)
     # This is returned to the UI; the sanitized value is internal-only.
     assistant_persona: str = Field(default="", max_length=500)
+    interests: str = Field(default="", max_length=500)
     sanitized_persona: str = Field(default="", max_length=500, exclude=True)
 
 
@@ -145,6 +146,7 @@ def get_language_settings(user_id: str) -> LanguageSettings:
         learning_language=entity.get("LearningLanguage", "Dutch"),
         assistant_persona=entity.get("AssistantPersonaRaw", entity.get("AssistantPersona", "")),
         sanitized_persona=entity.get("AssistantPersona", ""),
+        interests=entity.get("Interests", ""),
     )
 
 
@@ -194,6 +196,7 @@ def save_language_settings(user_id: str, settings: LanguageSettings) -> Language
                 "LearningLanguage": settings.learning_language,
                 "AssistantPersonaRaw": raw_persona,
                 "AssistantPersona": sanitized_persona,
+                "Interests": settings.interests[:500].strip(),
             }
         )
     except (HttpResponseError, KeyError) as error:
