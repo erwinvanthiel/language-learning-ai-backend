@@ -9,8 +9,8 @@ settings on the Function App:
 `AZURE_TABLE_ENDPOINT`, `SERVICE_BUS_NAMESPACE`, `SERVICE_BUS_QUEUE`,
 `SERVICE_BUS_CONNECTION`, `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, and
 `VAPID_SUBJECT` (for example `mailto:admin@example.com`). For interest-based
-article reminders, also configure `BING_SEARCH_ENDPOINT` (optional),
-`BING_SEARCH_KEY`, `AZURE_OPENAI_ENDPOINT`, and `AZURE_OPENAI_DEPLOYMENT`.
+article reminders, also configure `BRAVE_SEARCH_ENDPOINT` (optional),
+`BRAVE_SEARCH_API_KEY`, `AZURE_OPENAI_ENDPOINT`, and `AZURE_OPENAI_DEPLOYMENT`.
 
 Configure `VAPID_PUBLIC_KEY` on each FastAPI App Service as well. Generate a
 key pair with a Web Push/VAPID key generator and store the private key only in
