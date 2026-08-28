@@ -15,6 +15,9 @@ app = func.FunctionApp()
 
 
 def tables():
+    connection_string = os.getenv("AZURE_TABLE_CONNECTION_STRING")
+    if connection_string:
+        return TableServiceClient.from_connection_string(connection_string)
     return TableServiceClient(
         endpoint=os.environ["AZURE_TABLE_ENDPOINT"], credential=DefaultAzureCredential()
     )
