@@ -98,6 +98,9 @@ def due_users(now: datetime):
         last_push = user.get("LastStandardPushAt")
         if last_push:
             push_time = datetime.fromisoformat(last_push)
+            if now - push_time < timedelta(days=1):
+                logging.info("Skipping reminder user %s: last reminder was only %s ago", user_id, now - push_time)
+                continue
             if not any(
                 item.get("Role") == "user" and parse_row_time(item["RowKey"]) > push_time
                 for item in entities
