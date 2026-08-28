@@ -98,7 +98,7 @@ def due_users(now: datetime):
         last_push = user.get("LastStandardPushAt")
         if last_push:
             push_time = datetime.fromisoformat(last_push)
-            if now - push_time < timedelta(days=1):
+            if now - push_time < timedelta(minutes=10):
                 logging.info("Skipping reminder user %s: last reminder was only %s ago", user_id, now - push_time)
                 continue
             if not any(
@@ -156,6 +156,9 @@ def enqueue_reminders(_: func.TimerRequest) -> None:
                         "Role": "assistant",
                         "Text": body,
                         "StandardPush": True,
+                        "ArticleTitle": article["name"],
+                        "ArticleUrl": article["url"],
+                        "ArticleSnippet": article["snippet"],
                     }
                 )
                 sender.send_messages(ServiceBusMessage(json.dumps(payload)))
