@@ -2,6 +2,7 @@ import json
 import logging
 import os
 from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 
 import azure.functions as func
 from azure.data.tables import TableServiceClient, UpdateMode
@@ -64,6 +65,16 @@ def enqueue_reminders(_: func.TimerRequest) -> None:
         with client.get_queue_sender(queue) as sender:
             for user, subscription in due_users(now):
                 payload = {"user_id": user["RowKey"], "subscription": json.loads(subscription), "body": REMINDER}
+                message_time = now.strftime("%Y%m%dT%H%M%S.%fZ")
+                service.get_table_client("Messages").create_entity(
+                    {
+                        "PartitionKey": user["RowKey"],
+                        "RowKey": f"{message_time}_{uuid4().hex}",
+                        "Role": "assistant",
+                        "Text": REMINDER,
+                        "StandardPush": True,
+                    }
+                )
                 sender.send_messages(ServiceBusMessage(json.dumps(payload)))
                 user["LastStandardPushAt"] = now.isoformat()
                 users.upsert_entity(user, mode=UpdateMode.REPLACE)
