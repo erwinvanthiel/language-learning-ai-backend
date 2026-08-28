@@ -31,22 +31,26 @@ def parse_row_time(row_key: str) -> datetime:
 
 
 def find_article(interest: str) -> dict[str, str] | None:
-    endpoint = os.getenv("BING_SEARCH_ENDPOINT", "https://api.bing.microsoft.com/v7.0/search")
-    key = os.getenv("BING_SEARCH_KEY")
+    endpoint = os.getenv("BRAVE_SEARCH_ENDPOINT", "https://api.search.brave.com/res/v1/web/search")
+    key = os.getenv("BRAVE_SEARCH_API_KEY")
     if not key:
         return None
-    response = httpx.get(
-        endpoint,
-        headers={"Ocp-Apim-Subscription-Key": key},
-        params={"q": interest, "count": 5, "safeSearch": "Strict", "textFormat": "Raw"},
-        timeout=10,
-    )
-    response.raise_for_status()
-    articles = response.json().get("webPages", {}).get("value", [])
-    for article in articles:
-        name, url, snippet = article.get("name"), article.get("url"), article.get("snippet")
-        if isinstance(name, str) and isinstance(url, str) and isinstance(snippet, str):
-            return {"name": name[:300], "url": url[:1000], "snippet": snippet[:1000]}
+    queries = [part.strip() for part in interest.split(",") if part.strip()] or [interest]
+    for query in queries:
+        response = httpx.get(
+            endpoint,
+            headers={"X-Subscription-Token": key, "Accept": "application/json"},
+            params={"q": query, "count": 5, "safesearch": "strict"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        articles = response.json().get("web", {}).get("results", [])
+        logging.info("Brave returned %d results for query %r", len(articles), query)
+        for article in articles:
+            name, url = article.get("title"), article.get("url")
+            snippet = article.get("description") or " ".join(article.get("extra_snippets", []))
+            if isinstance(name, str) and isinstance(url, str):
+                return {"name": name[:300], "url": url[:1000], "snippet": str(snippet)[:1000]}
     return None
 
 
