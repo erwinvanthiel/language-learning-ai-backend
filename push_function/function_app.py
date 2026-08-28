@@ -81,6 +81,7 @@ def due_users(now: datetime):
     for user in users:
         subscription = user.get("PushSubscription")
         if not subscription:
+            logging.info("Skipping reminder user %s: no push subscription", user.get("RowKey"))
             continue
         user_id = user["RowKey"]
         entities = sorted(
@@ -88,6 +89,7 @@ def due_users(now: datetime):
             key=lambda item: item["RowKey"],
         )
         if not entities:
+            logging.info("Skipping reminder user %s: no messages", user_id)
             continue
         last_push = user.get("LastStandardPushAt")
         if last_push:
@@ -97,10 +99,18 @@ def due_users(now: datetime):
                 for item in entities
             ):
                 # Do not repeatedly notify someone who ignored the previous reminder.
+                logging.info("Skipping reminder user %s: previous push was not answered", user_id)
                 continue
         user_messages = [item for item in entities if item.get("Role") == "user"]
-        if not user_messages or now - parse_row_time(user_messages[-1]["RowKey"]) < timedelta(minutes=10):
+        if not user_messages:
+            logging.info("Skipping reminder user %s: no user messages", user_id)
             continue
+        latest_user_time = parse_row_time(user_messages[-1]["RowKey"])
+        age = now - latest_user_time
+        if age < timedelta(minutes=10):
+            logging.info("Skipping reminder user %s: latest message is only %s old", user_id, age)
+            continue
+        logging.info("Reminder due for user %s: latest user message=%s age=%s", user_id, latest_user_time, age)
         yield user, subscription
 
 
@@ -115,12 +125,18 @@ def enqueue_reminders(_: func.TimerRequest) -> None:
             for user, subscription in due_users(now):
                 interest = str(user.get("Interests", "")).strip()
                 if not interest:
+                    logging.info("Skipping reminder user %s: no interests configured", user["RowKey"])
                     continue
                 try:
                     article = find_article(interest)
                     if not article:
+                        logging.warning("No Brave article found for user %s", user["RowKey"])
                         continue
+                    logging.info("Found Brave article for user %s: %s", user["RowKey"], article["url"])
                     body = compose_article_message(user, article)
+                    if not body:
+                        logging.warning("Azure OpenAI returned an empty reminder for user %s", user["RowKey"])
+                        continue
                 except Exception:
                     logging.exception("Could not create an interest-based reminder for %s", user["RowKey"])
                     continue
@@ -138,6 +154,7 @@ def enqueue_reminders(_: func.TimerRequest) -> None:
                 sender.send_messages(ServiceBusMessage(json.dumps(payload)))
                 user["LastStandardPushAt"] = now.isoformat()
                 users.upsert_entity(user, mode=UpdateMode.REPLACE)
+                logging.info("Queued interest reminder for user %s", user["RowKey"])
 
 
 @app.timer_trigger(schedule="0 */10 * * * *", arg_name="timer", run_on_startup=False)
