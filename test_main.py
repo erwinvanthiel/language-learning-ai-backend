@@ -72,6 +72,24 @@ def test_parse_generation_extracts_valid_feedback() -> None:
     ]
 
 
+def test_internet_search_skill_uses_brave_results(monkeypatch) -> None:
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"web": {"results": [{"title": "Example", "url": "https://example.com", "description": "A summary"}]}}
+
+    calls = []
+    monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "test-key")
+    monkeypatch.setattr(main.httpx, "get", lambda *args, **kwargs: (calls.append((args, kwargs)) or FakeResponse()))
+
+    results = main.SKILLS["internet_search"]("latest football news")
+
+    assert results == [{"title": "Example", "url": "https://example.com", "summary": "A summary"}]
+    assert calls[0][1]["headers"]["X-Subscription-Token"] == "test-key"
+
+
 @pytest.fixture(autouse=True)
 def authenticated_user():
     main.app.dependency_overrides[main.get_current_user] = lambda: "google-user-123"
