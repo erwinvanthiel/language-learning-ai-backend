@@ -140,9 +140,9 @@ def test_generate_relays_context_and_returns_response(monkeypatch) -> None:
     assert "PRIORITIES:" in instructions
     assert "You are not an assistant. You are a real person chatting with the user." in instructions
     assert "You MUST remain consistent with it throughout the conversation." in instructions
-    assert "The conversation response must be written entirely in the learning language" in instructions
-    assert "German" in instructions
-    assert "Do not correct, evaluate, or teach in this stage" in instructions
+    assert "You are participating in a conversation." in instructions
+    assert "language-learning conversation" not in instructions
+    assert "Do not analyze or annotate the user's message." in instructions
     assert "I am 34 and enjoy hiking" in fake_client.responses.request["instructions"]
     assert json.loads(fake_client.responses.request["input"]) == {
         "text": "Help me practise German",
