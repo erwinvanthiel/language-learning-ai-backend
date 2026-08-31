@@ -123,7 +123,7 @@ def test_generate_relays_context_and_returns_response(monkeypatch) -> None:
     monkeypatch.setattr(
         main,
         "register_user_and_message",
-        lambda user_id, text=None, role="user", feedback=None: stored_messages.append(
+        lambda user_id, text=None, role="user", feedback=None, web_context=None: stored_messages.append(
             (user_id, text, role, feedback)
         ),
     )
