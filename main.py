@@ -68,6 +68,32 @@ class StoredMessage(BaseModel):
     feedback: list[FeedbackAnnotation] = Field(default_factory=list)
 
 
+class ResponseDraft(BaseModel):
+    response: str = Field(min_length=1)
+
+
+@lru_cache(maxsize=8)
+def get_deep_agent(deployment: str, system_prompt: str):
+    """Build a LangChain Deep Agent with Azure OpenAI and the web skill."""
+    from deepagents import create_deep_agent
+    from langchain_openai import ChatOpenAI
+
+    token_provider = get_bearer_token_provider(
+        DefaultAzureCredential(), "https://cognitiveservices.azure.com/.default"
+    )
+    model = ChatOpenAI(
+        model=deployment,
+        base_url=f"{os.environ['AZURE_OPENAI_ENDPOINT'].rstrip('/')}/openai/v1/",
+        api_key=token_provider,
+    )
+    return create_deep_agent(
+        model=model,
+        tools=[internet_search],
+        system_prompt=system_prompt,
+        response_format=ResponseDraft,
+    )
+
+
 Skill = Callable[[str], list[dict[str, str]]]
 SKILLS: dict[str, Skill] = {}
 
@@ -537,16 +563,21 @@ def run_response_agent(
 ) -> tuple[str, bool]:
     """Generate/evaluate a natural response and revise it at most once."""
     candidate_input = generation_input
+    deep_agent = get_deep_agent(deployment, instructions)
     for iteration in range(max_iterations):
-        result = client.responses.create(
-            model=deployment,
-            instructions=instructions
-            + "\n\nReturn ONLY valid JSON with exactly {\"response\": \"...\"}. Do not provide corrections.",
-            input=json.dumps(candidate_input, ensure_ascii=False),
-            max_output_tokens=1000,
+        result = deep_agent.invoke(
+            {"messages": [{"role": "user", "content": json.dumps(candidate_input, ensure_ascii=False)}]}
         )
-        response_text, _ = parse_generation(result.output_text, "")
-        if not response_text or (response_text == result.output_text and not result.output_text.lstrip().startswith("{")):
+        structured = result.get("structured_response")
+        if isinstance(structured, ResponseDraft):
+            response_text = structured.response
+            structured_output = True
+        else:
+            messages = result.get("messages", [])
+            output = getattr(messages[-1], "content", "") if messages else ""
+            response_text, _ = parse_generation(str(output), "")
+            structured_output = False
+        if not response_text:
             return response_text, False
         passed, issues = _evaluate_response(
             client,
@@ -555,13 +586,13 @@ def run_response_agent(
             candidate_input,
         )
         if passed or iteration + 1 >= max_iterations:
-            return response_text, True
+            return response_text, structured_output
         candidate_input = {
             **candidate_input,
             "draft_response": response_text,
             "evaluation_issues": issues,
         }
-    return response_text, True
+    return response_text, structured_output
 
 
 @app.get("/settings", response_model=LanguageSettings)
