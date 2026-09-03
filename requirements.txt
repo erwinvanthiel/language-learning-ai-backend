@@ -4,4 +4,6 @@ fastapi
 httpx
 google-auth>=2.40,<3
 openai>=2,<3
+deepagents>=1,<2
+langchain-openai>=1,<2
 uvicorn[standard]
