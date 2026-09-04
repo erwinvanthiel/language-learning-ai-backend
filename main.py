@@ -563,20 +563,38 @@ def run_response_agent(
 ) -> tuple[str, bool]:
     """Generate/evaluate a natural response and revise it at most once."""
     candidate_input = generation_input
-    deep_agent = get_deep_agent(deployment, instructions)
+    try:
+        deep_agent = get_deep_agent(deployment, instructions)
+    except Exception:
+        logging.exception("Deep Agent construction failed; using Azure OpenAI compatibility fallback")
+        deep_agent = None
     for iteration in range(max_iterations):
-        result = deep_agent.invoke(
-            {"messages": [{"role": "user", "content": json.dumps(candidate_input, ensure_ascii=False)}]}
-        )
-        structured = result.get("structured_response")
-        if isinstance(structured, ResponseDraft):
-            response_text = structured.response
-            structured_output = True
-        else:
-            messages = result.get("messages", [])
-            output = getattr(messages[-1], "content", "") if messages else ""
-            response_text, _ = parse_generation(str(output), "")
-            structured_output = False
+        try:
+            if deep_agent is None:
+                raise RuntimeError("Deep Agent unavailable")
+            result = deep_agent.invoke(
+                {"messages": [{"role": "user", "content": json.dumps(candidate_input, ensure_ascii=False)}]}
+            )
+            structured = result.get("structured_response")
+            if isinstance(structured, ResponseDraft):
+                response_text = structured.response
+                structured_output = True
+            else:
+                messages = result.get("messages", [])
+                output = getattr(messages[-1], "content", "") if messages else ""
+                response_text, _ = parse_generation(str(output), "")
+                structured_output = False
+        except Exception:
+            # Preserve availability if a model/provider rejects Deep Agent tool+schema calls.
+            logging.exception("Deep Agent invocation failed; using Azure OpenAI compatibility fallback")
+            legacy = client.responses.create(
+                model=deployment,
+                instructions=instructions + "\nReturn only JSON with a response field; do not provide corrections.",
+                input=json.dumps(candidate_input, ensure_ascii=False),
+                max_output_tokens=1000,
+            )
+            response_text, _ = parse_generation(legacy.output_text, "")
+            structured_output = bool(response_text)
         if not response_text:
             return response_text, False
         passed, issues = _evaluate_response(
