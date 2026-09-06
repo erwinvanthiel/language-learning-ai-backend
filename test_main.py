@@ -145,10 +145,10 @@ def test_generate_relays_context_and_returns_response(monkeypatch) -> None:
     assert response.json() == {"response": "Hallo!", "feedback": []}
     assert "You are not an assistant. You are a real person chatting with the user." in agent_prompts[0]
     assert "language-learning conversation" not in agent_prompts[0]
-    assert json.loads(agent_calls[0]["messages"][0]["content"]) == {
-        "text": "Help me practise German",
-        "level": "A2",
-    }
+    agent_input = json.loads(agent_calls[0]["messages"][0]["content"])
+    assert agent_input["text"] == "Help me practise German"
+    assert agent_input["level"] == "A2"
+    assert agent_input["trace_id"]
     assert stored_messages == [
         ("google-user-123", "Help me practise German", "user", None),
         ("google-user-123", "Hallo!", "assistant", []),
