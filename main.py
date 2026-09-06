@@ -521,38 +521,11 @@ def _evaluate_response(client: OpenAI, deployment: str, candidate: str, context:
 def _select_search_skill(
     client: OpenAI, deployment: str, generation_input: dict[str, Any]
 ) -> dict[str, Any]:
-    """Ask the agent whether internet context is needed, then execute that skill if so."""
+    """Evaluate context needs, then execute retrieval separately when requested."""
     explicit = generation_input.get("search_query") or generation_input.get("search")
     query = explicit if isinstance(explicit, str) else ""
     if not query.strip():
-        try:
-            decision = client.responses.create(
-                model=deployment,
-                instructions=(
-                    "Decide whether answering this request needs factual or current internet information. "
-                    "When the user asks about a fact, named entity, event, product, place, or anything "
-                    "you may not know reliably, prefer searching rather than guessing or saying you do "
-                    "not have access. Search before claiming uncertainty. Do not search for ordinary "
-                    "small talk when no factual information is needed. "
-                    'Return only JSON: {"needs_search": true|false, "query": ""}. '
-                    "Choose false only for ordinary conversation or when supplied knowledge and web resources suffice. "
-                    "Treat knowledge_context as retrieved evidence; if it is empty, stale, or does not answer "
-                    "the request, set needs_search true and provide a focused query."
-                ),
-                input=json.dumps(generation_input, ensure_ascii=False),
-                max_output_tokens=100,
-            )
-            payload = json.loads(decision.output_text)
-            if payload.get("needs_search") is True and isinstance(payload.get("query"), str):
-                query = payload["query"]
-        except (OpenAIError, TypeError, ValueError, json.JSONDecodeError):
-            logging.exception("Search planning step failed")
-    # A conservative deterministic fallback prevents current/factual questions
-    # (especially sports events) from being answered from stale model memory.
-    if not query.strip() and not generation_input.get("knowledge_context"):
-        text = str(generation_input.get("text", ""))
-        if re.search(r"\b(when|where|who|what|which|latest|current|today|yesterday|score|match|game|sport|tournament|championship|league|event|news|won|winner)\b", text, re.I):
-            query = text
+        query = _evaluate_context_need(client, deployment, generation_input)
     if not query.strip():
         return generation_input
     try:
@@ -561,6 +534,31 @@ def _select_search_skill(
         logging.exception("Internet search skill failed")
         return generation_input
     return {**generation_input, "skill_results": {"internet_search": results}}
+
+
+def _evaluate_context_need(client: OpenAI, deployment: str, generation_input: dict[str, Any]) -> str:
+    """Decide generically whether fresh factual context is needed and form a query."""
+    try:
+        decision = client.responses.create(
+            model=deployment,
+            instructions=(
+                "Evaluate whether the conversation can be answered accurately with the supplied context. "
+                "Fresh external information is required when the user asks about current, changing, "
+                "verifiable, or otherwise factual information that is missing, stale, or insufficient in "
+                "knowledge_context. It is not required for greetings, opinions, creative writing, or casual "
+                "conversation. Do not infer a topic from a fixed list: apply the same reasoning to every topic. "
+                'Return only JSON: {"needs_context": true|false, "query": "focused search query"}. '
+                "If needs_context is false, query must be empty."
+            ),
+            input=json.dumps(generation_input, ensure_ascii=False),
+            max_output_tokens=150,
+        )
+        payload = json.loads(decision.output_text)
+        if payload.get("needs_context") is True and isinstance(payload.get("query"), str):
+            return payload["query"].strip()
+    except (OpenAIError, TypeError, ValueError, json.JSONDecodeError):
+        logging.exception("Context-requirement evaluation failed")
+    return ""
 
 
 def _generate_feedback(
