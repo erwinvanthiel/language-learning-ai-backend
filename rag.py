@@ -16,6 +16,7 @@ from html.parser import HTMLParser
 from typing import Any
 
 import httpx
+from openai import AzureOpenAI
 from azure.identity import DefaultAzureCredential
 from azure.search.documents import SearchClient
 from azure.search.documents.indexes import SearchIndexClient
@@ -141,7 +142,20 @@ def _embed(client: Any, texts: list[str]) -> list[list[float]]:
     deployment = os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT")
     if not deployment or not texts:
         return []
-    result = client.embeddings.create(model=deployment, input=texts)
+    try:
+        result = client.embeddings.create(model=deployment, input=texts)
+    except Exception as error:
+        logging.warning("OpenAI-compatible embedding call failed; retrying native Azure endpoint: %s", error)
+        from azure.identity import get_bearer_token_provider
+
+        native_client = AzureOpenAI(
+            azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+            api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21"),
+            azure_ad_token_provider=get_bearer_token_provider(
+                DefaultAzureCredential(), "https://cognitiveservices.azure.com/.default"
+            ),
+        )
+        result = native_client.embeddings.create(model=deployment, input=texts)
     return [item.embedding for item in sorted(result.data, key=lambda item: item.index)]
 
 
