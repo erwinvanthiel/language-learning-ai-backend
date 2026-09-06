@@ -676,6 +676,7 @@ def delete_messages(user_id: Annotated[str, Depends(get_current_user)]) -> dict[
             table.delete_entity(partition_key=user_id, row_key=entity["RowKey"])
     except (HttpResponseError, KeyError) as error:
         raise HTTPException(status_code=503, detail="Message storage is unavailable.") from error
+    rag.delete_owner_documents(user_id)
     return {"deleted": len(entities)}
 
 

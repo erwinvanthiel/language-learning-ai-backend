@@ -306,3 +306,31 @@ def fetch_and_index(result: dict[str, str], owner_id: str, openai_client: Any) -
 def index_message(text: str, owner_id: str, openai_client: Any, source_url: str = "") -> None:
     title = "Conversation message"
     index_document(text, owner_id, source_url or f"conversation://{owner_id}", title, "push" if source_url else "conversation", openai_client)
+
+
+def delete_owner_documents(owner_id: str) -> int:
+    """Delete all private conversation and push evidence for one user."""
+    if not _configured():
+        return 0
+    try:
+        ensure_index()
+        safe_owner = owner_id.replace("'", "''")
+        client = search_client()
+        ids = [row["id"] for row in client.search(
+            search_text="*",
+            filter=f"owner_id eq '{safe_owner}'",
+            select=["id"],
+            top=100000,
+        ) if row.get("id")]
+        deleted = 0
+        for start in range(0, len(ids), 1000):
+            result = client.delete_documents(documents=[{"id": value} for value in ids[start:start + 1000]])
+            for item in result:
+                succeeded = getattr(item, "succeeded", None)
+                if succeeded is None and isinstance(item, dict):
+                    succeeded = item.get("succeeded", False)
+                deleted += int(bool(succeeded))
+        return deleted
+    except Exception:
+        logging.exception("Azure AI Search history deletion failed")
+        return 0
