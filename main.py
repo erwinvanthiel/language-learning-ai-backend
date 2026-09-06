@@ -22,6 +22,8 @@ import httpx
 from openai import OpenAI, OpenAIError
 from pydantic import BaseModel, Field
 
+import rag
+
 
 class GenerateRequest(BaseModel):
     context: dict[str, Any] = Field(description="Context forwarded to Azure OpenAI")
@@ -288,6 +290,15 @@ def store_message(
             **({"WebContext": json.dumps(web_context, ensure_ascii=False)} if web_context else {}),
         }
     )
+    # Search indexing is deliberately best-effort; chat persistence must remain
+    # available when the optional AI Search resource is unavailable.
+    try:
+        source_url = ""
+        if web_context:
+            source_url = str(web_context[0].get("url", ""))
+        rag.index_message(text, user_id, get_openai_client(), source_url=source_url)
+    except Exception:
+        logging.exception("Could not index message in Azure AI Search")
 
 
 def register_user_and_message(
@@ -505,7 +516,9 @@ def _select_search_skill(
                     "not have access. Search before claiming uncertainty. Do not search for ordinary "
                     "small talk when no factual information is needed. "
                     'Return only JSON: {"needs_search": true|false, "query": ""}. '
-                    "Choose false only for ordinary conversation or when supplied web resources suffice."
+                    "Choose false only for ordinary conversation or when supplied knowledge and web resources suffice. "
+                    "Treat knowledge_context as retrieved evidence; if it is empty, stale, or does not answer "
+                    "the request, set needs_search true and provide a focused query."
                 ),
                 input=json.dumps(generation_input, ensure_ascii=False),
                 max_output_tokens=100,
@@ -698,8 +711,19 @@ def generate(
 
     try:
         client = get_openai_client()
+        knowledge_context = rag.retrieve(message_text, user_id, client)
+        if knowledge_context:
+            generation_input = {**generation_input, "knowledge_context": knowledge_context}
         generation_input = _select_search_skill(client, deployment, generation_input)
         web_context = generation_input.get("skill_results", {}).get("internet_search")
+        if web_context:
+            # Fetch and index at most the first result. A follow-up retrieval
+            # gives the model the same bounded, provenance-preserving shape as
+            # existing knowledge.
+            rag.fetch_and_index(web_context[0], user_id, client)
+            refreshed = rag.retrieve(message_text, user_id, client)
+            if refreshed:
+                generation_input = {**generation_input, "knowledge_context": refreshed}
         register_user_and_message(user_id, message_text, "user", web_context=web_context)
         response_text, response_structured = run_response_agent(
             client,
