@@ -218,6 +218,25 @@ def _existing_hash(source_url: str, owner_id: str) -> str | None:
         return None
 
 
+def _source_is_fresh(source_url: str, owner_id: str) -> bool:
+    """Avoid downloading a page again while its indexed copy is fresh."""
+    if not _configured():
+        return False
+    safe_url = source_url.replace("'", "''")
+    safe_owner = owner_id.replace("'", "''")
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, int(os.getenv("RAG_FRESHNESS_DAYS", "7"))))).isoformat().replace("+00:00", "Z")
+    try:
+        rows = search_client().search(
+            search_text="*",
+            filter=f"source_url eq '{safe_url}' and owner_id eq '{safe_owner}' and source_type eq 'web' and updated_at ge {cutoff}",
+            select=["id"],
+            top=1,
+        )
+        return next(iter(rows), None) is not None
+    except Exception:
+        return False
+
+
 def index_document(
     content: str,
     owner_id: str,
@@ -271,6 +290,8 @@ def index_document(
 def fetch_and_index(result: dict[str, str], owner_id: str, openai_client: Any) -> list[dict[str, str]]:
     url = result.get("url", "")
     if not url.startswith(("https://", "http://")):
+        return []
+    if _source_is_fresh(url, owner_id):
         return []
     try:
         response = httpx.get(url, follow_redirects=True, timeout=15, headers={"User-Agent": "language-learning-ai/1.0"})
