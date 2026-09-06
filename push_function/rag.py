@@ -21,6 +21,7 @@ from azure.search.documents.indexes.models import (
     VectorSearchProfile,
 )
 from openai import OpenAI
+from openai import AzureOpenAI
 
 
 @lru_cache(maxsize=1)
@@ -75,7 +76,18 @@ def index_push_message(text: str, user_id: str, source_url: str, title: str, sni
         existing = next(iter(search.search(search_text="*", filter=f"document_id eq '{document_id}'", select=["source_hash"], top=1)), None)
         if existing and existing.get("source_hash") == source_hash:
             return
-        vector = openai.embeddings.create(model=embedding_deployment, input=[content]).data[0].embedding
+        try:
+            vector = openai.embeddings.create(model=embedding_deployment, input=[content]).data[0].embedding
+        except Exception as error:
+            logging.warning("OpenAI-compatible push embedding failed; retrying native endpoint: %s", error)
+            native = AzureOpenAI(
+                azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+                api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21"),
+                azure_ad_token_provider=get_bearer_token_provider(
+                    DefaultAzureCredential(), "https://cognitiveservices.azure.com/.default"
+                ),
+            )
+            vector = native.embeddings.create(model=embedding_deployment, input=[content]).data[0].embedding
         search.upload_documents(documents=[{
             "id": f"{document_id}-0", "document_id": document_id, "owner_id": user_id,
             "content": content, "content_vector": vector, "source_url": source_url[:2000],
