@@ -346,6 +346,25 @@ def get_article_context(user_id: str) -> list[dict[str, str]]:
     return articles[-5:]
 
 
+def get_conversation_history(user_id: str, limit: int = 12) -> list[dict[str, str]]:
+    """Load recent turns so short follow-ups retain conversational referents."""
+    try:
+        entities = list(
+            get_table_service_client().get_table_client("Messages").query_entities(
+                f"PartitionKey eq '{user_id}'"
+            )
+        )
+    except Exception:
+        return []
+    history = []
+    for entity in sorted(entities, key=lambda item: item.get("RowKey", ""))[-limit:]:
+        role = entity.get("Role")
+        text = entity.get("Text")
+        if role in {"user", "assistant"} and isinstance(text, str) and text.strip():
+            history.append({"role": role, "text": text[-3000:]})
+    return history
+
+
 app = FastAPI(title="Language Learning AI API")
 
 app.add_middleware(
@@ -527,7 +546,13 @@ def _select_search_skill(
             if payload.get("needs_search") is True and isinstance(payload.get("query"), str):
                 query = payload["query"]
         except (OpenAIError, TypeError, ValueError, json.JSONDecodeError):
-            return generation_input
+            logging.exception("Search planning step failed")
+    # A conservative deterministic fallback prevents current/factual questions
+    # (especially sports events) from being answered from stale model memory.
+    if not query.strip() and not generation_input.get("knowledge_context"):
+        text = str(generation_input.get("text", ""))
+        if re.search(r"\b(when|where|who|what|which|latest|current|today|yesterday|score|match|game|sport|tournament|championship|league|event|news|won|winner)\b", text, re.I):
+            query = text
     if not query.strip():
         return generation_input
     try:
@@ -697,6 +722,7 @@ def generate(
         message_text = json.dumps(request.context, ensure_ascii=False)
     settings = get_language_settings(user_id)
     article_context = get_article_context(user_id)
+    conversation_history = get_conversation_history(user_id)
     # Language settings are consumed only by the separate correction stage.
     generation_input: dict[str, Any] = {
         key: value for key, value in request.context.items()
@@ -708,10 +734,17 @@ def generate(
             "conversation_message": request.context,
             "web_resources": article_context,
         }
+    if conversation_history:
+        generation_input = {**generation_input, "conversation_history": conversation_history}
 
     try:
         client = get_openai_client()
-        knowledge_context = rag.retrieve(message_text, user_id, client)
+        retrieval_query = message_text
+        if conversation_history:
+            retrieval_query = "\n".join(
+                f"{turn['role']}: {turn['text']}" for turn in conversation_history[-4:]
+            ) + f"\nuser: {message_text}"
+        knowledge_context = rag.retrieve(retrieval_query, user_id, client)
         if knowledge_context:
             generation_input = {**generation_input, "knowledge_context": knowledge_context}
         generation_input = _select_search_skill(client, deployment, generation_input)
@@ -721,7 +754,7 @@ def generate(
             # gives the model the same bounded, provenance-preserving shape as
             # existing knowledge.
             rag.fetch_and_index(web_context[0], user_id, client)
-            refreshed = rag.retrieve(message_text, user_id, client)
+            refreshed = rag.retrieve(retrieval_query, user_id, client)
             if refreshed:
                 generation_input = {**generation_input, "knowledge_context": refreshed}
         register_user_and_message(user_id, message_text, "user", web_context=web_context)
