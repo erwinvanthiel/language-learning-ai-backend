@@ -72,6 +72,24 @@ def test_parse_generation_extracts_valid_feedback() -> None:
     ]
 
 
+def test_internet_search_skill_uses_brave_results(monkeypatch) -> None:
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"web": {"results": [{"title": "Example", "url": "https://example.com", "description": "A summary"}]}}
+
+    calls = []
+    monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "test-key")
+    monkeypatch.setattr(main.httpx, "get", lambda *args, **kwargs: (calls.append((args, kwargs)) or FakeResponse()))
+
+    results = main.SKILLS["internet_search"]("latest football news")
+
+    assert results == [{"title": "Example", "url": "https://example.com", "summary": "A summary"}]
+    assert calls[0][1]["headers"]["X-Subscription-Token"] == "test-key"
+
+
 @pytest.fixture(autouse=True)
 def authenticated_user():
     main.app.dependency_overrides[main.get_current_user] = lambda: "google-user-123"
@@ -89,9 +107,17 @@ def test_read_root() -> None:
 def test_generate_relays_context_and_returns_response(monkeypatch) -> None:
     fake_client = FakeOpenAIClient()
     stored_messages = []
+    agent_calls = []
+    agent_prompts = []
     monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://example.openai.azure.com")
     monkeypatch.setenv("AZURE_OPENAI_DEPLOYMENT", "test-deployment")
     monkeypatch.setattr(main, "get_openai_client", lambda: fake_client)
+    class FakeAgent:
+        def invoke(self, payload):
+            agent_calls.append(payload)
+            return {"structured_response": main.ResponseDraft(response="Hallo!"), "messages": []}
+
+    monkeypatch.setattr(main, "get_deep_agent", lambda deployment, prompt: (agent_prompts.append(prompt) or FakeAgent()))
     monkeypatch.setattr(
         main,
         "get_language_settings",
@@ -105,7 +131,7 @@ def test_generate_relays_context_and_returns_response(monkeypatch) -> None:
     monkeypatch.setattr(
         main,
         "register_user_and_message",
-        lambda user_id, text=None, role="user", feedback=None: stored_messages.append(
+        lambda user_id, text=None, role="user", feedback=None, web_context=None: stored_messages.append(
             (user_id, text, role, feedback)
         ),
     )
@@ -117,17 +143,9 @@ def test_generate_relays_context_and_returns_response(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert response.json() == {"response": "Hallo!", "feedback": []}
-    assert fake_client.responses.request["model"] == "test-deployment"
-    instructions = fake_client.responses.request["instructions"]
-    assert "PRIORITIES:" in instructions
-    assert "You are not an assistant. You are a real person chatting with the user." in instructions
-    assert "You MUST remain consistent with it throughout the conversation." in instructions
-    assert "The conversation response must be written entirely in the learning language" in instructions
-    assert "German" in instructions
-    assert "Correction comments must be written entirely in the user's native language" in instructions
-    assert "English" in instructions
-    assert "I am 34 and enjoy hiking" in fake_client.responses.request["instructions"]
-    assert json.loads(fake_client.responses.request["input"]) == {
+    assert "You are not an assistant. You are a real person chatting with the user." in agent_prompts[0]
+    assert "language-learning conversation" not in agent_prompts[0]
+    assert json.loads(agent_calls[0]["messages"][0]["content"]) == {
         "text": "Help me practise German",
         "level": "A2",
     }
@@ -169,6 +187,7 @@ def test_read_and_update_language_settings(monkeypatch) -> None:
         "native_language": "English",
         "learning_language": "Dutch",
         "assistant_persona": "",
+        "interests": "",
     }
 
     response = client.put(

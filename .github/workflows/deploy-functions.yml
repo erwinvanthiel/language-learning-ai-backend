@@ -1,0 +1,63 @@
+name: Deploy reminder functions
+
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - "push_function/**"
+      - "rag.py"
+      - ".github/workflows/deploy-functions.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: push_function
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r requirements.txt
+      - run: python -m compileall -q .
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+    env:
+      RESOURCE_GROUP: language-learning-ai-rg
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install function dependencies into package
+        run: python -m pip install --target push_function/.python_packages/lib/site-packages -r push_function/requirements.txt
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Create deployment package
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZIP_DEFLATED, ZipFile
+
+          root = Path("push_function")
+          with ZipFile("push_function.zip", "w", ZIP_DEFLATED) as archive:
+              for path in root.rglob("*"):
+                  if path.is_file():
+                      archive.write(path, path.relative_to(root))
+          PY
+      - name: Deploy to Flex Consumption Function App
+        env:
+          FUNCTION_APP: ${{ github.ref_name == 'main' && vars.AZURE_FUNCTION_APP_NAME || vars.AZURE_DEV_FUNCTION_APP_NAME }}
+        run: az functionapp deployment source config-zip --resource-group "$RESOURCE_GROUP" --name "$FUNCTION_APP" --src push_function.zip
