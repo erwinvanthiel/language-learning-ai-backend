@@ -76,7 +76,10 @@ class ResponseDraft(BaseModel):
 
 @lru_cache(maxsize=8)
 def get_deep_agent(deployment: str, system_prompt: str):
-    """Build a LangChain Deep Agent with Azure OpenAI and the web skill."""
+    """Build a LangChain Deep Agent with Azure OpenAI.
+
+    Web retrieval is performed by the response harness before this agent runs.
+    """
     from deepagents import create_deep_agent
     from langchain_openai import ChatOpenAI
 
@@ -88,9 +91,10 @@ def get_deep_agent(deployment: str, system_prompt: str):
         base_url=f"{os.environ['AZURE_OPENAI_ENDPOINT'].rstrip('/')}/openai/v1/",
         api_key=token_provider,
     )
+    # Web retrieval is intentionally controlled by the harness: it must happen
+    # only after Azure AI Search evidence has been evaluated for sufficiency.
     return create_deep_agent(
         model=model,
-        tools=[internet_search],
         system_prompt=system_prompt,
         response_format=ResponseDraft,
     )
