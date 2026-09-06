@@ -25,6 +25,13 @@ from pydantic import BaseModel, Field
 import rag
 
 
+def agent_trace(event: str, trace_id: str = "", **details: object) -> None:
+    """Emit safe structured agent-step logs when explicitly enabled."""
+    if os.getenv("AGENT_DEBUG_TRACE", "").lower() != "true":
+        return
+    logging.info("agent_trace %s", json.dumps({"event": event, "trace_id": trace_id, **details}, ensure_ascii=False))
+
+
 class GenerateRequest(BaseModel):
     context: dict[str, Any] = Field(description="Context forwarded to Azure OpenAI")
 
@@ -537,6 +544,12 @@ def _select_search_skill(
     except (httpx.HTTPError, ValueError):
         logging.exception("Internet search skill failed")
         return generation_input
+    agent_trace(
+        "web_search_completed",
+        str(generation_input.get("trace_id", "")),
+        prompt=query,
+        response=results,
+    )
     return {**generation_input, "skill_results": {"internet_search": results}}
 
 
@@ -558,10 +571,19 @@ def _evaluate_context_need(client: OpenAI, deployment: str, generation_input: di
             max_output_tokens=150,
         )
         payload = json.loads(decision.output_text)
+        agent_trace(
+            "context_evaluation",
+            str(generation_input.get("trace_id", "")),
+            needs_context=payload.get("needs_context") is True,
+            has_existing_evidence=bool(generation_input.get("knowledge_context")),
+            prompt=generation_input,
+            response=payload,
+        )
         if payload.get("needs_context") is True and isinstance(payload.get("query"), str):
             return payload["query"].strip()
     except (OpenAIError, TypeError, ValueError, json.JSONDecodeError):
         logging.exception("Context-requirement evaluation failed")
+        agent_trace("context_evaluation_failed", str(generation_input.get("trace_id", "")))
     return ""
 
 
@@ -610,6 +632,12 @@ def run_response_agent(
         deep_agent = None
     for iteration in range(max_iterations):
         try:
+            agent_trace(
+                "response_agent_request",
+                str(candidate_input.get("trace_id", "")),
+                prompt=candidate_input,
+                iteration=iteration + 1,
+            )
             if deep_agent is None:
                 raise RuntimeError("Deep Agent unavailable")
             result = deep_agent.invoke(
@@ -635,6 +663,12 @@ def run_response_agent(
             )
             response_text, _ = parse_generation(legacy.output_text, "")
             structured_output = bool(response_text)
+        agent_trace(
+            "response_agent_response",
+            str(candidate_input.get("trace_id", "")),
+            response=response_text,
+            iteration=iteration + 1,
+        )
         if not response_text:
             return response_text, False
         passed, issues = _evaluate_response(
@@ -724,6 +758,7 @@ def generate(
     if not isinstance(message_text, str):
         message_text = json.dumps(request.context, ensure_ascii=False)
     settings = get_language_settings(user_id)
+    trace_id = uuid4().hex
     article_context = get_article_context(user_id)
     conversation_history = get_conversation_history(user_id)
     # Language settings are consumed only by the separate correction stage.
@@ -731,6 +766,7 @@ def generate(
         key: value for key, value in request.context.items()
         if key not in {"native_language", "learning_language"}
     }
+    generation_input["trace_id"] = trace_id
     if article_context:
         generation_input = {
             **generation_input,
@@ -748,15 +784,18 @@ def generate(
                 f"{turn['role']}: {turn['text']}" for turn in conversation_history[-4:]
             ) + f"\nuser: {message_text}"
         knowledge_context = rag.retrieve(retrieval_query, user_id, client)
+        agent_trace("knowledge_retrieval_completed", trace_id, prompt=retrieval_query, response=knowledge_context)
         if knowledge_context:
             generation_input = {**generation_input, "knowledge_context": knowledge_context}
         generation_input = _select_search_skill(client, deployment, generation_input)
         web_context = generation_input.get("skill_results", {}).get("internet_search")
         if web_context:
+            agent_trace("web_search_requested", trace_id, prompt=message_text, response=web_context)
             # Fetch and index at most the first result. A follow-up retrieval
             # gives the model the same bounded, provenance-preserving shape as
             # existing knowledge.
-            rag.fetch_and_index(web_context[0], user_id, client)
+            indexed = rag.fetch_and_index(web_context[0], user_id, client)
+            agent_trace("web_page_indexed", trace_id, response=indexed)
             refreshed = rag.retrieve(retrieval_query, user_id, client)
             if refreshed:
                 generation_input = {**generation_input, "knowledge_context": refreshed}
