@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+import time
 from collections import deque
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -11,7 +12,7 @@ from uuid import uuid4
 from azure.core.exceptions import HttpResponseError
 from azure.data.tables import TableServiceClient, UpdateMode
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
-from fastapi import Depends
+from fastapi import BackgroundTasks, Depends
 from fastapi import FastAPI
 from fastapi import Header
 from fastapi import HTTPException
@@ -29,13 +30,21 @@ import rag
 _AGENT_TRACE_BUFFER: deque[dict[str, Any]] = deque(
     maxlen=max(10, int(os.getenv("AGENT_DEBUG_TRACE_LIMIT", "100")))
 )
+_TRACE_STARTS: dict[str, float] = {}
 
 
 def agent_trace(event: str, trace_id: str = "", **details: object) -> None:
     """Emit safe structured agent-step logs when explicitly enabled."""
     if os.getenv("AGENT_DEBUG_TRACE", "").lower() != "true":
         return
-    record = {"event": event, "trace_id": trace_id, **details}
+    if trace_id and trace_id not in _TRACE_STARTS:
+        _TRACE_STARTS[trace_id] = time.perf_counter()
+    record = {
+        "event": event,
+        "trace_id": trace_id,
+        "elapsed_ms": round((time.perf_counter() - _TRACE_STARTS.get(trace_id, time.perf_counter())) * 1000, 1),
+        **details,
+    }
     _AGENT_TRACE_BUFFER.append(record)
     logging.getLogger("uvicorn.error").info("agent_trace %s", json.dumps(record, ensure_ascii=False))
 
@@ -297,6 +306,7 @@ def store_message(
     role: Literal["user", "assistant"] = "user",
     feedback: list[FeedbackAnnotation] | None = None,
     web_context: list[dict[str, str]] | None = None,
+    index_search: bool = True,
 ) -> None:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     get_table_service_client().get_table_client("Messages").create_entity(
@@ -311,6 +321,8 @@ def store_message(
     )
     # Search indexing is deliberately best-effort; chat persistence must remain
     # available when the optional AI Search resource is unavailable.
+    if not index_search:
+        return
     try:
         source_url = ""
         if web_context:
@@ -326,11 +338,12 @@ def register_user_and_message(
     role: Literal["user", "assistant"] = "user",
     feedback: list[FeedbackAnnotation] | None = None,
     web_context: list[dict[str, str]] | None = None,
+    index_search: bool = True,
 ) -> None:
     try:
         store_user(user_id)
         if text is not None:
-            store_message(user_id, text, role, feedback, web_context)
+            store_message(user_id, text, role, feedback, web_context, index_search=index_search)
     except (HttpResponseError, KeyError) as error:
         raise HTTPException(status_code=503, detail="Message storage is unavailable.") from error
 
@@ -382,6 +395,16 @@ def get_conversation_history(user_id: str, limit: int = 12) -> list[dict[str, st
         if role in {"user", "assistant"} and isinstance(text, str) and text.strip():
             history.append({"role": role, "text": text[-3000:]})
     return history
+
+
+def index_message_background(
+    user_id: str, text: str, source_url: str = ""
+) -> None:
+    """Index a message after the HTTP response has been prepared."""
+    try:
+        rag.index_message(text, user_id, get_openai_client(), source_url=source_url)
+    except Exception:
+        logging.exception("Background message indexing failed")
 
 
 app = FastAPI(title="Language Learning AI API")
@@ -765,6 +788,7 @@ def delete_push_subscription(user_id: Annotated[str, Depends(get_current_user)])
 def generate(
     request: GenerateRequest,
     user_id: Annotated[str, Depends(get_current_user)],
+    background_tasks: BackgroundTasks,
 ) -> GenerateResponse:
     deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT")
     if not deployment or not os.getenv("AZURE_OPENAI_ENDPOINT"):
@@ -812,10 +836,13 @@ def generate(
             # existing knowledge.
             indexed = rag.fetch_and_index(web_context[0], user_id, client)
             agent_trace("web_page_indexed", trace_id, response=indexed)
-            refreshed = rag.retrieve(retrieval_query, user_id, client)
-            if refreshed:
-                generation_input = {**generation_input, "knowledge_context": refreshed}
-        register_user_and_message(user_id, message_text, "user", web_context=web_context)
+            if indexed:
+                refreshed = rag.retrieve(retrieval_query, user_id, client)
+                if refreshed:
+                    generation_input = {**generation_input, "knowledge_context": refreshed}
+        register_user_and_message(
+            user_id, message_text, "user", web_context=web_context, index_search=False
+        )
         response_text, response_structured = run_response_agent(
             client,
             deployment,
@@ -910,5 +937,8 @@ def generate(
                 status_code=502,
                 detail="Azure OpenAI could not evaluate the message.",
             ) from error
-    register_user_and_message(user_id, response_text, "assistant", feedback)
+    register_user_and_message(user_id, response_text, "assistant", feedback, index_search=False)
+    source_url = str(web_context[0].get("url", "")) if web_context else ""
+    background_tasks.add_task(index_message_background, user_id, message_text, source_url)
+    background_tasks.add_task(index_message_background, user_id, response_text, source_url)
     return GenerateResponse(response=response_text, feedback=feedback)

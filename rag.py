@@ -104,6 +104,7 @@ def search_client() -> SearchClient:
     )
 
 
+@lru_cache(maxsize=1)
 def ensure_index() -> None:
     if not _configured():
         return
@@ -308,7 +309,7 @@ def fetch_and_index(result: dict[str, str], owner_id: str, openai_client: Any) -
     if _source_is_fresh(url, owner_id):
         return []
     try:
-        response = httpx.get(url, follow_redirects=True, timeout=15, headers={"User-Agent": "language-learning-ai/1.0"})
+        response = httpx.get(url, follow_redirects=True, timeout=8, headers={"User-Agent": "language-learning-ai/1.0"})
         response.raise_for_status()
         text = extract_page_text(response.text)
         return index_document(text, owner_id, str(response.url), result.get("title", ""), "web", openai_client)
