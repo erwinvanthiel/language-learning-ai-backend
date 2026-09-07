@@ -24,6 +24,14 @@ from pydantic import BaseModel, Field
 
 import rag
 
+if os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING"):
+    try:
+        from azure.monitor.opentelemetry import configure_azure_monitor
+
+        configure_azure_monitor()
+    except Exception:
+        logging.exception("Application Insights initialization failed")
+
 
 def agent_trace(event: str, trace_id: str = "", **details: object) -> None:
     """Emit safe structured agent-step logs when explicitly enabled."""
