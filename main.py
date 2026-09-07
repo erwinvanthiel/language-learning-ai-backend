@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+from collections import deque
 from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Annotated, Any, Callable, Literal
@@ -24,23 +25,19 @@ from pydantic import BaseModel, Field
 
 import rag
 
-if os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING"):
-    try:
-        from azure.monitor.opentelemetry import configure_azure_monitor
 
-        configure_azure_monitor()
-    except Exception:
-        logging.exception("Application Insights initialization failed")
+_AGENT_TRACE_BUFFER: deque[dict[str, Any]] = deque(
+    maxlen=max(10, int(os.getenv("AGENT_DEBUG_TRACE_LIMIT", "100")))
+)
 
 
 def agent_trace(event: str, trace_id: str = "", **details: object) -> None:
     """Emit safe structured agent-step logs when explicitly enabled."""
     if os.getenv("AGENT_DEBUG_TRACE", "").lower() != "true":
         return
-    logging.getLogger("uvicorn.error").info(
-        "agent_trace %s",
-        json.dumps({"event": event, "trace_id": trace_id, **details}, ensure_ascii=False),
-    )
+    record = {"event": event, "trace_id": trace_id, **details}
+    _AGENT_TRACE_BUFFER.append(record)
+    logging.getLogger("uvicorn.error").info("agent_trace %s", json.dumps(record, ensure_ascii=False))
 
 
 class GenerateRequest(BaseModel):
@@ -404,6 +401,14 @@ app.add_middleware(
 @app.get("/")
 def read_root() -> dict[str, str]:
     return {"message": "Hello, world!"}
+
+
+@app.get("/debug/agent-traces")
+def read_agent_traces() -> list[dict[str, Any]]:
+    """Return recent agent traces in explicitly enabled development environments."""
+    if os.getenv("AGENT_DEBUG_TRACE", "").lower() != "true":
+        raise HTTPException(status_code=404, detail="Not found.")
+    return list(_AGENT_TRACE_BUFFER)
 
 
 @app.get("/messages", response_model=list[StoredMessage])
