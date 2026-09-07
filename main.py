@@ -29,7 +29,10 @@ def agent_trace(event: str, trace_id: str = "", **details: object) -> None:
     """Emit safe structured agent-step logs when explicitly enabled."""
     if os.getenv("AGENT_DEBUG_TRACE", "").lower() != "true":
         return
-    logging.info("agent_trace %s", json.dumps({"event": event, "trace_id": trace_id, **details}, ensure_ascii=False))
+    logging.getLogger("uvicorn.error").info(
+        "agent_trace %s",
+        json.dumps({"event": event, "trace_id": trace_id, **details}, ensure_ascii=False),
+    )
 
 
 class GenerateRequest(BaseModel):
