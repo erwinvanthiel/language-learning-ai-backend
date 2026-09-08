@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import random
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -37,6 +38,7 @@ def find_article(interest: str) -> dict[str, str] | None:
     if not key:
         return None
     queries = [part.strip() for part in interest.split(",") if part.strip()] or [interest]
+    random.shuffle(queries)
     for query in queries:
         response = httpx.get(
             endpoint,
