@@ -16,6 +16,7 @@ from html.parser import HTMLParser
 from typing import Any
 
 import httpx
+from openai import AzureOpenAI
 from azure.identity import DefaultAzureCredential
 from azure.search.documents import SearchClient
 from azure.search.documents.indexes import SearchIndexClient
@@ -103,6 +104,7 @@ def search_client() -> SearchClient:
     )
 
 
+@lru_cache(maxsize=1)
 def ensure_index() -> None:
     if not _configured():
         return
@@ -141,7 +143,20 @@ def _embed(client: Any, texts: list[str]) -> list[list[float]]:
     deployment = os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT")
     if not deployment or not texts:
         return []
-    result = client.embeddings.create(model=deployment, input=texts)
+    try:
+        result = client.embeddings.create(model=deployment, input=texts)
+    except Exception as error:
+        logging.warning("OpenAI-compatible embedding call failed; retrying native Azure endpoint: %s", error)
+        from azure.identity import get_bearer_token_provider
+
+        native_client = AzureOpenAI(
+            azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+            api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21"),
+            azure_ad_token_provider=get_bearer_token_provider(
+                DefaultAzureCredential(), "https://cognitiveservices.azure.com/.default"
+            ),
+        )
+        result = native_client.embeddings.create(model=deployment, input=texts)
     return [item.embedding for item in sorted(result.data, key=lambda item: item.index)]
 
 
@@ -294,7 +309,7 @@ def fetch_and_index(result: dict[str, str], owner_id: str, openai_client: Any) -
     if _source_is_fresh(url, owner_id):
         return []
     try:
-        response = httpx.get(url, follow_redirects=True, timeout=15, headers={"User-Agent": "language-learning-ai/1.0"})
+        response = httpx.get(url, follow_redirects=True, timeout=8, headers={"User-Agent": "language-learning-ai/1.0"})
         response.raise_for_status()
         text = extract_page_text(response.text)
         return index_document(text, owner_id, str(response.url), result.get("title", ""), "web", openai_client)
@@ -306,3 +321,31 @@ def fetch_and_index(result: dict[str, str], owner_id: str, openai_client: Any) -
 def index_message(text: str, owner_id: str, openai_client: Any, source_url: str = "") -> None:
     title = "Conversation message"
     index_document(text, owner_id, source_url or f"conversation://{owner_id}", title, "push" if source_url else "conversation", openai_client)
+
+
+def delete_owner_documents(owner_id: str) -> int:
+    """Delete all private conversation and push evidence for one user."""
+    if not _configured():
+        return 0
+    try:
+        ensure_index()
+        safe_owner = owner_id.replace("'", "''")
+        client = search_client()
+        ids = [row["id"] for row in client.search(
+            search_text="*",
+            filter=f"owner_id eq '{safe_owner}'",
+            select=["id"],
+            top=100000,
+        ) if row.get("id")]
+        deleted = 0
+        for start in range(0, len(ids), 1000):
+            result = client.delete_documents(documents=[{"id": value} for value in ids[start:start + 1000]])
+            for item in result:
+                succeeded = getattr(item, "succeeded", None)
+                if succeeded is None and isinstance(item, dict):
+                    succeeded = item.get("succeeded", False)
+                deleted += int(bool(succeeded))
+        return deleted
+    except Exception:
+        logging.exception("Azure AI Search history deletion failed")
+        return 0

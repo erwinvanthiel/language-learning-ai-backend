@@ -2,6 +2,8 @@ import json
 import logging
 import os
 import re
+import time
+from collections import deque
 from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Annotated, Any, Callable, Literal
@@ -10,7 +12,7 @@ from uuid import uuid4
 from azure.core.exceptions import HttpResponseError
 from azure.data.tables import TableServiceClient, UpdateMode
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
-from fastapi import Depends
+from fastapi import BackgroundTasks, Depends
 from fastapi import FastAPI
 from fastapi import Header
 from fastapi import HTTPException
@@ -23,6 +25,28 @@ from openai import OpenAI, OpenAIError
 from pydantic import BaseModel, Field
 
 import rag
+
+
+_AGENT_TRACE_BUFFER: deque[dict[str, Any]] = deque(
+    maxlen=max(10, int(os.getenv("AGENT_DEBUG_TRACE_LIMIT", "100")))
+)
+_TRACE_STARTS: dict[str, float] = {}
+
+
+def agent_trace(event: str, trace_id: str = "", **details: object) -> None:
+    """Emit safe structured agent-step logs when explicitly enabled."""
+    if os.getenv("AGENT_DEBUG_TRACE", "").lower() != "true":
+        return
+    if trace_id and trace_id not in _TRACE_STARTS:
+        _TRACE_STARTS[trace_id] = time.perf_counter()
+    record = {
+        "event": event,
+        "trace_id": trace_id,
+        "elapsed_ms": round((time.perf_counter() - _TRACE_STARTS.get(trace_id, time.perf_counter())) * 1000, 1),
+        **details,
+    }
+    _AGENT_TRACE_BUFFER.append(record)
+    logging.getLogger("uvicorn.error").info("agent_trace %s", json.dumps(record, ensure_ascii=False))
 
 
 class GenerateRequest(BaseModel):
@@ -76,7 +100,10 @@ class ResponseDraft(BaseModel):
 
 @lru_cache(maxsize=8)
 def get_deep_agent(deployment: str, system_prompt: str):
-    """Build a LangChain Deep Agent with Azure OpenAI and the web skill."""
+    """Build a LangChain Deep Agent with Azure OpenAI.
+
+    Web retrieval is performed by the response harness before this agent runs.
+    """
     from deepagents import create_deep_agent
     from langchain_openai import ChatOpenAI
 
@@ -88,9 +115,10 @@ def get_deep_agent(deployment: str, system_prompt: str):
         base_url=f"{os.environ['AZURE_OPENAI_ENDPOINT'].rstrip('/')}/openai/v1/",
         api_key=token_provider,
     )
+    # Web retrieval is intentionally controlled by the harness: it must happen
+    # only after Azure AI Search evidence has been evaluated for sufficiency.
     return create_deep_agent(
         model=model,
-        tools=[internet_search],
         system_prompt=system_prompt,
         response_format=ResponseDraft,
     )
@@ -278,6 +306,7 @@ def store_message(
     role: Literal["user", "assistant"] = "user",
     feedback: list[FeedbackAnnotation] | None = None,
     web_context: list[dict[str, str]] | None = None,
+    index_search: bool = True,
 ) -> None:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     get_table_service_client().get_table_client("Messages").create_entity(
@@ -292,6 +321,8 @@ def store_message(
     )
     # Search indexing is deliberately best-effort; chat persistence must remain
     # available when the optional AI Search resource is unavailable.
+    if not index_search:
+        return
     try:
         source_url = ""
         if web_context:
@@ -307,11 +338,12 @@ def register_user_and_message(
     role: Literal["user", "assistant"] = "user",
     feedback: list[FeedbackAnnotation] | None = None,
     web_context: list[dict[str, str]] | None = None,
+    index_search: bool = True,
 ) -> None:
     try:
         store_user(user_id)
         if text is not None:
-            store_message(user_id, text, role, feedback, web_context)
+            store_message(user_id, text, role, feedback, web_context, index_search=index_search)
     except (HttpResponseError, KeyError) as error:
         raise HTTPException(status_code=503, detail="Message storage is unavailable.") from error
 
@@ -346,6 +378,35 @@ def get_article_context(user_id: str) -> list[dict[str, str]]:
     return articles[-5:]
 
 
+def get_conversation_history(user_id: str, limit: int = 12) -> list[dict[str, str]]:
+    """Load recent turns so short follow-ups retain conversational referents."""
+    try:
+        entities = list(
+            get_table_service_client().get_table_client("Messages").query_entities(
+                f"PartitionKey eq '{user_id}'"
+            )
+        )
+    except Exception:
+        return []
+    history = []
+    for entity in sorted(entities, key=lambda item: item.get("RowKey", ""))[-limit:]:
+        role = entity.get("Role")
+        text = entity.get("Text")
+        if role in {"user", "assistant"} and isinstance(text, str) and text.strip():
+            history.append({"role": role, "text": text[-3000:]})
+    return history
+
+
+def index_message_background(
+    user_id: str, text: str, source_url: str = ""
+) -> None:
+    """Index a message after the HTTP response has been prepared."""
+    try:
+        rag.index_message(text, user_id, get_openai_client(), source_url=source_url)
+    except Exception:
+        logging.exception("Background message indexing failed")
+
+
 app = FastAPI(title="Language Learning AI API")
 
 app.add_middleware(
@@ -363,6 +424,14 @@ app.add_middleware(
 @app.get("/")
 def read_root() -> dict[str, str]:
     return {"message": "Hello, world!"}
+
+
+@app.get("/debug/agent-traces")
+def read_agent_traces() -> list[dict[str, Any]]:
+    """Return recent agent traces in explicitly enabled development environments."""
+    if os.getenv("AGENT_DEBUG_TRACE", "").lower() != "true":
+        raise HTTPException(status_code=404, detail="Not found.")
+    return list(_AGENT_TRACE_BUFFER)
 
 
 @app.get("/messages", response_model=list[StoredMessage])
@@ -502,32 +571,11 @@ def _evaluate_response(client: OpenAI, deployment: str, candidate: str, context:
 def _select_search_skill(
     client: OpenAI, deployment: str, generation_input: dict[str, Any]
 ) -> dict[str, Any]:
-    """Ask the agent whether internet context is needed, then execute that skill if so."""
+    """Evaluate context needs, then execute retrieval separately when requested."""
     explicit = generation_input.get("search_query") or generation_input.get("search")
     query = explicit if isinstance(explicit, str) else ""
     if not query.strip():
-        try:
-            decision = client.responses.create(
-                model=deployment,
-                instructions=(
-                    "Decide whether answering this request needs factual or current internet information. "
-                    "When the user asks about a fact, named entity, event, product, place, or anything "
-                    "you may not know reliably, prefer searching rather than guessing or saying you do "
-                    "not have access. Search before claiming uncertainty. Do not search for ordinary "
-                    "small talk when no factual information is needed. "
-                    'Return only JSON: {"needs_search": true|false, "query": ""}. '
-                    "Choose false only for ordinary conversation or when supplied knowledge and web resources suffice. "
-                    "Treat knowledge_context as retrieved evidence; if it is empty, stale, or does not answer "
-                    "the request, set needs_search true and provide a focused query."
-                ),
-                input=json.dumps(generation_input, ensure_ascii=False),
-                max_output_tokens=100,
-            )
-            payload = json.loads(decision.output_text)
-            if payload.get("needs_search") is True and isinstance(payload.get("query"), str):
-                query = payload["query"]
-        except (OpenAIError, TypeError, ValueError, json.JSONDecodeError):
-            return generation_input
+        query = _evaluate_context_need(client, deployment, generation_input)
     if not query.strip():
         return generation_input
     try:
@@ -535,7 +583,47 @@ def _select_search_skill(
     except (httpx.HTTPError, ValueError):
         logging.exception("Internet search skill failed")
         return generation_input
+    agent_trace(
+        "web_search_completed",
+        str(generation_input.get("trace_id", "")),
+        prompt=query,
+        response=results,
+    )
     return {**generation_input, "skill_results": {"internet_search": results}}
+
+
+def _evaluate_context_need(client: OpenAI, deployment: str, generation_input: dict[str, Any]) -> str:
+    """Decide generically whether fresh factual context is needed and form a query."""
+    try:
+        decision = client.responses.create(
+            model=deployment,
+            instructions=(
+                "Evaluate whether the conversation can be answered accurately with the supplied context. "
+                "Fresh external information is required when the user asks about current, changing, "
+                "verifiable, or otherwise factual information that is missing, stale, or insufficient in "
+                "knowledge_context. It is not required for greetings, opinions, creative writing, or casual "
+                "conversation. Do not infer a topic from a fixed list: apply the same reasoning to every topic. "
+                'Return only JSON: {"needs_context": true|false, "query": "focused search query"}. '
+                "If needs_context is false, query must be empty."
+            ),
+            input=json.dumps(generation_input, ensure_ascii=False),
+            max_output_tokens=150,
+        )
+        payload = json.loads(decision.output_text)
+        agent_trace(
+            "context_evaluation",
+            str(generation_input.get("trace_id", "")),
+            needs_context=payload.get("needs_context") is True,
+            has_existing_evidence=bool(generation_input.get("knowledge_context")),
+            prompt=generation_input,
+            response=payload,
+        )
+        if payload.get("needs_context") is True and isinstance(payload.get("query"), str):
+            return payload["query"].strip()
+    except (OpenAIError, TypeError, ValueError, json.JSONDecodeError):
+        logging.exception("Context-requirement evaluation failed")
+        agent_trace("context_evaluation_failed", str(generation_input.get("trace_id", "")))
+    return ""
 
 
 def _generate_feedback(
@@ -583,6 +671,12 @@ def run_response_agent(
         deep_agent = None
     for iteration in range(max_iterations):
         try:
+            agent_trace(
+                "response_agent_request",
+                str(candidate_input.get("trace_id", "")),
+                prompt=candidate_input,
+                iteration=iteration + 1,
+            )
             if deep_agent is None:
                 raise RuntimeError("Deep Agent unavailable")
             result = deep_agent.invoke(
@@ -608,6 +702,12 @@ def run_response_agent(
             )
             response_text, _ = parse_generation(legacy.output_text, "")
             structured_output = bool(response_text)
+        agent_trace(
+            "response_agent_response",
+            str(candidate_input.get("trace_id", "")),
+            response=response_text,
+            iteration=iteration + 1,
+        )
         if not response_text:
             return response_text, False
         passed, issues = _evaluate_response(
@@ -649,6 +749,7 @@ def delete_messages(user_id: Annotated[str, Depends(get_current_user)]) -> dict[
             table.delete_entity(partition_key=user_id, row_key=entity["RowKey"])
     except (HttpResponseError, KeyError) as error:
         raise HTTPException(status_code=503, detail="Message storage is unavailable.") from error
+    rag.delete_owner_documents(user_id)
     return {"deleted": len(entities)}
 
 
@@ -687,6 +788,7 @@ def delete_push_subscription(user_id: Annotated[str, Depends(get_current_user)])
 def generate(
     request: GenerateRequest,
     user_id: Annotated[str, Depends(get_current_user)],
+    background_tasks: BackgroundTasks,
 ) -> GenerateResponse:
     deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT")
     if not deployment or not os.getenv("AZURE_OPENAI_ENDPOINT"):
@@ -696,35 +798,51 @@ def generate(
     if not isinstance(message_text, str):
         message_text = json.dumps(request.context, ensure_ascii=False)
     settings = get_language_settings(user_id)
+    trace_id = uuid4().hex
     article_context = get_article_context(user_id)
+    conversation_history = get_conversation_history(user_id)
     # Language settings are consumed only by the separate correction stage.
     generation_input: dict[str, Any] = {
         key: value for key, value in request.context.items()
         if key not in {"native_language", "learning_language"}
     }
+    generation_input["trace_id"] = trace_id
     if article_context:
         generation_input = {
             **generation_input,
             "conversation_message": request.context,
             "web_resources": article_context,
         }
+    if conversation_history:
+        generation_input = {**generation_input, "conversation_history": conversation_history}
 
     try:
         client = get_openai_client()
-        knowledge_context = rag.retrieve(message_text, user_id, client)
+        retrieval_query = message_text
+        if conversation_history:
+            retrieval_query = "\n".join(
+                f"{turn['role']}: {turn['text']}" for turn in conversation_history[-4:]
+            ) + f"\nuser: {message_text}"
+        knowledge_context = rag.retrieve(retrieval_query, user_id, client)
+        agent_trace("knowledge_retrieval_completed", trace_id, prompt=retrieval_query, response=knowledge_context)
         if knowledge_context:
             generation_input = {**generation_input, "knowledge_context": knowledge_context}
         generation_input = _select_search_skill(client, deployment, generation_input)
         web_context = generation_input.get("skill_results", {}).get("internet_search")
         if web_context:
+            agent_trace("web_search_requested", trace_id, prompt=message_text, response=web_context)
             # Fetch and index at most the first result. A follow-up retrieval
             # gives the model the same bounded, provenance-preserving shape as
             # existing knowledge.
-            rag.fetch_and_index(web_context[0], user_id, client)
-            refreshed = rag.retrieve(message_text, user_id, client)
-            if refreshed:
-                generation_input = {**generation_input, "knowledge_context": refreshed}
-        register_user_and_message(user_id, message_text, "user", web_context=web_context)
+            indexed = rag.fetch_and_index(web_context[0], user_id, client)
+            agent_trace("web_page_indexed", trace_id, response=indexed)
+            if indexed:
+                refreshed = rag.retrieve(retrieval_query, user_id, client)
+                if refreshed:
+                    generation_input = {**generation_input, "knowledge_context": refreshed}
+        register_user_and_message(
+            user_id, message_text, "user", web_context=web_context, index_search=False
+        )
         response_text, response_structured = run_response_agent(
             client,
             deployment,
@@ -819,5 +937,8 @@ def generate(
                 status_code=502,
                 detail="Azure OpenAI could not evaluate the message.",
             ) from error
-    register_user_and_message(user_id, response_text, "assistant", feedback)
+    register_user_and_message(user_id, response_text, "assistant", feedback, index_search=False)
+    source_url = str(web_context[0].get("url", "")) if web_context else ""
+    background_tasks.add_task(index_message_background, user_id, message_text, source_url)
+    background_tasks.add_task(index_message_background, user_id, response_text, source_url)
     return GenerateResponse(response=response_text, feedback=feedback)

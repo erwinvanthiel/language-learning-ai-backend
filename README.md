@@ -78,3 +78,40 @@ The target must be a Linux App Service configured for Python 3.12. Optionally ad
 required reviewers to the `production` environment to put an approval gate before
 deployment. See [Microsoft's App Service deployment documentation](https://learn.microsoft.com/azure/app-service/deploy-github-actions)
 for the Azure-side OIDC setup.
+
+## Agentic response flow
+
+The response pipeline is intentionally split into bounded stages. `POST /generate`
+first loads the user's persisted conversation/article references and queries the
+Azure AI Search knowledge base with hybrid keyword + vector retrieval. Retrieved
+chunks are deduplicated and capped by the evidence budget. A planning step then
+decides whether that evidence is sufficient. For factual or current questions it
+can invoke the registered `internet_search` skill (Brave), which returns at most
+one candidate page. The page is fetched, cleaned of markup, normalized, chunked,
+embedded with the configured Azure OpenAI embedding deployment, and indexed with
+its URL and provenance. The request performs a fresh retrieval so the response
+agent receives the newly indexed evidence.
+
+The conversational stage runs through LangChain Deep Agents with the Azure OpenAI
+chat model and the web-search skill. Its draft is evaluated against a response
+quality check and revised at most once. Language corrections are a separate pass:
+they annotate only genuine mistakes in the learning language and do not change the
+natural response. User and assistant messages are persisted in Azure Table Storage
+and indexed best-effort in the same AI Search index, so a Search outage does not
+prevent normal chat storage.
+
+Autonomous reminders follow a similar flow in the timer-triggered Function App:
+the function selects an eligible user, searches Brave for one interest-related
+article, asks Azure OpenAI to start a conversation about it, stores the resulting
+assistant message and source URL, indexes that message in AI Search, and queues the
+push notification through Azure Service Bus. Because the push text and source are
+indexed, later conversations can retrieve and discuss what was previously sent.
+
+### RAG configuration
+
+Set `AZURE_SEARCH_ENDPOINT`, `AZURE_SEARCH_INDEX_NAME`, and
+`AZURE_OPENAI_EMBEDDING_DEPLOYMENT` (plus the optional
+`AZURE_OPENAI_EMBEDDING_DIMENSIONS`, `RAG_TOP_K`, `RAG_EVIDENCE_BUDGET_CHARS`, and
+`RAG_FRESHNESS_DAYS`). The App Service and Function App managed identities need
+`Search Index Data Contributor` on the search service. The index is created or
+updated lazily on the first request that uses the RAG layer.
