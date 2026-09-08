@@ -101,7 +101,7 @@ def due_users(now: datetime):
         last_push = user.get("LastStandardPushAt")
         if last_push:
             push_time = datetime.fromisoformat(last_push)
-            if now - push_time < timedelta(minutes=10):
+            if now - push_time < timedelta(hours=24):
                 logging.info("Skipping reminder user %s: last reminder was only %s ago", user_id, now - push_time)
                 continue
             if not any(
@@ -171,7 +171,7 @@ def enqueue_reminders(_: func.TimerRequest) -> None:
                 logging.info("Queued interest reminder for user %s", user["RowKey"])
 
 
-@app.timer_trigger(schedule="0 */10 * * * *", arg_name="timer", run_on_startup=False)
+@app.timer_trigger(schedule="0 0 9 * * *", arg_name="timer", run_on_startup=False)
 def reminder_timer(timer: func.TimerRequest) -> None:
     enqueue_reminders(timer)
 
