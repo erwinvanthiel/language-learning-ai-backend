@@ -12,7 +12,7 @@ from uuid import uuid4
 from azure.core.exceptions import HttpResponseError
 from azure.data.tables import TableServiceClient, UpdateMode
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
-from fastapi import BackgroundTasks, Depends
+from fastapi import Depends
 from fastapi import FastAPI
 from fastapi import Header
 from fastapi import HTTPException
@@ -306,7 +306,6 @@ def store_message(
     role: Literal["user", "assistant"] = "user",
     feedback: list[FeedbackAnnotation] | None = None,
     web_context: list[dict[str, str]] | None = None,
-    index_search: bool = True,
 ) -> None:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     get_table_service_client().get_table_client("Messages").create_entity(
@@ -319,31 +318,17 @@ def store_message(
             **({"WebContext": json.dumps(web_context, ensure_ascii=False)} if web_context else {}),
         }
     )
-    # Search indexing is deliberately best-effort; chat persistence must remain
-    # available when the optional AI Search resource is unavailable.
-    if not index_search:
-        return
-    try:
-        source_url = ""
-        if web_context:
-            source_url = str(web_context[0].get("url", ""))
-        rag.index_message(text, user_id, get_openai_client(), source_url=source_url)
-    except Exception:
-        logging.exception("Could not index message in Azure AI Search")
-
-
 def register_user_and_message(
     user_id: str,
     text: str | None = None,
     role: Literal["user", "assistant"] = "user",
     feedback: list[FeedbackAnnotation] | None = None,
     web_context: list[dict[str, str]] | None = None,
-    index_search: bool = True,
 ) -> None:
     try:
         store_user(user_id)
         if text is not None:
-            store_message(user_id, text, role, feedback, web_context, index_search=index_search)
+            store_message(user_id, text, role, feedback, web_context)
     except (HttpResponseError, KeyError) as error:
         raise HTTPException(status_code=503, detail="Message storage is unavailable.") from error
 
@@ -395,16 +380,6 @@ def get_conversation_history(user_id: str, limit: int = 12) -> list[dict[str, st
         if role in {"user", "assistant"} and isinstance(text, str) and text.strip():
             history.append({"role": role, "text": text[-3000:]})
     return history
-
-
-def index_message_background(
-    user_id: str, text: str, source_url: str = ""
-) -> None:
-    """Index a message after the HTTP response has been prepared."""
-    try:
-        rag.index_message(text, user_id, get_openai_client(), source_url=source_url)
-    except Exception:
-        logging.exception("Background message indexing failed")
 
 
 app = FastAPI(title="Language Learning AI API")
@@ -626,6 +601,38 @@ def _evaluate_context_need(client: OpenAI, deployment: str, generation_input: di
     return ""
 
 
+def _select_relevant_history(
+    client: OpenAI, deployment: str, message_text: str, history: list[dict[str, str]], trace_id: str
+) -> list[dict[str, str]]:
+    """Select only prior turns needed to understand the current user message."""
+    if not history:
+        return []
+    bounded = history[-12:]
+    try:
+        result = client.responses.create(
+            model=deployment,
+            instructions=(
+                "Select prior conversation turns that are necessary to answer the current user message. "
+                "Include turns that resolve references, preserve an active topic, or contain relevant facts. "
+                "Exclude unrelated greetings and old topics. Return only JSON as "
+                '{"turns":[0,1]}. Indices refer to the supplied history array.'
+            ),
+            input=json.dumps({"current_message": message_text, "history": bounded}, ensure_ascii=False),
+            max_output_tokens=120,
+        )
+        payload = json.loads(result.output_text)
+        indices = payload.get("turns", [])
+        selected = [bounded[index] for index in indices if isinstance(index, int) and 0 <= index < len(bounded)]
+        selected = selected[-8:]
+        agent_trace("conversation_relevance_selection", trace_id, prompt=bounded, response=selected)
+        return selected
+    except (OpenAIError, TypeError, ValueError, json.JSONDecodeError):
+        logging.exception("Conversation relevance selection failed")
+        fallback = bounded[-6:]
+        agent_trace("conversation_relevance_selection_failed", trace_id, response=fallback)
+        return fallback
+
+
 def _generate_feedback(
     client: OpenAI, deployment: str, message_text: str, response_text: str, native_language: str
 ) -> list[FeedbackAnnotation]:
@@ -788,7 +795,6 @@ def delete_push_subscription(user_id: Annotated[str, Depends(get_current_user)])
 def generate(
     request: GenerateRequest,
     user_id: Annotated[str, Depends(get_current_user)],
-    background_tasks: BackgroundTasks,
 ) -> GenerateResponse:
     deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT")
     if not deployment or not os.getenv("AZURE_OPENAI_ENDPOINT"):
@@ -818,6 +824,13 @@ def generate(
 
     try:
         client = get_openai_client()
+        conversation_history = _select_relevant_history(
+            client, deployment, message_text, conversation_history, trace_id
+        )
+        if conversation_history:
+            generation_input = {**generation_input, "conversation_history": conversation_history}
+        else:
+            generation_input.pop("conversation_history", None)
         retrieval_query = message_text
         if conversation_history:
             retrieval_query = "\n".join(
@@ -841,7 +854,7 @@ def generate(
                 if refreshed:
                     generation_input = {**generation_input, "knowledge_context": refreshed}
         register_user_and_message(
-            user_id, message_text, "user", web_context=web_context, index_search=False
+            user_id, message_text, "user", web_context=web_context
         )
         response_text, response_structured = run_response_agent(
             client,
@@ -937,8 +950,5 @@ def generate(
                 status_code=502,
                 detail="Azure OpenAI could not evaluate the message.",
             ) from error
-    register_user_and_message(user_id, response_text, "assistant", feedback, index_search=False)
-    source_url = str(web_context[0].get("url", "")) if web_context else ""
-    background_tasks.add_task(index_message_background, user_id, message_text, source_url)
-    background_tasks.add_task(index_message_background, user_id, response_text, source_url)
+    register_user_and_message(user_id, response_text, "assistant", feedback)
     return GenerateResponse(response=response_text, feedback=feedback)

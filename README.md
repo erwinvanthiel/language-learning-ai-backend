@@ -97,21 +97,21 @@ chat model and the web-search skill. Its draft is evaluated against a response
 quality check and revised at most once. Language corrections are a separate pass:
 they annotate only genuine mistakes in the learning language and do not change the
 natural response. User and assistant messages are persisted in Azure Table Storage
-and indexed best-effort in the same AI Search index, so a Search outage does not
-prevent normal chat storage.
+and remain in Table Storage; only fetched web documents are indexed in AI Search.
+This keeps conversation history separate from reusable factual knowledge.
 
 Autonomous reminders follow a similar flow in the timer-triggered Function App:
 the function selects an eligible user, searches Brave for one interest-related
 article, asks Azure OpenAI to start a conversation about it, stores the resulting
 assistant message and source URL, indexes that message in AI Search, and queues the
-push notification through Azure Service Bus. Because the push text and source are
-indexed, later conversations can retrieve and discuss what was previously sent.
+push notification through Azure Service Bus. The discovered web page is indexed
+with its source URL, while the push text remains in Table Storage.
 
 ### RAG configuration
 
 Set `AZURE_SEARCH_ENDPOINT`, `AZURE_SEARCH_INDEX_NAME`, and
 `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` (plus the optional
 `AZURE_OPENAI_EMBEDDING_DIMENSIONS`, `RAG_TOP_K`, `RAG_EVIDENCE_BUDGET_CHARS`, and
-`RAG_FRESHNESS_DAYS`). The App Service and Function App managed identities need
+`RAG_FRESHNESS_DAYS`). The App Service managed identity needs
 `Search Index Data Contributor` on the search service. The index is created or
 updated lazily on the first request that uses the RAG layer.
