@@ -1,5 +1,8 @@
 # Development workflow
 
+- Before starting any new feature or material fix, run the `grill-me` interview
+  and resolve its design questions before creating implementation work.
+
 - Treat `main` as the production branch and `dev` as the staging/integration branch.
 - Before creating a feature branch, fetch both branches and fast-forward `dev` from `main` (for example, `git fetch origin main dev && git switch dev && git pull --ff-only origin dev && git merge --ff-only origin/main`). Resolve any synchronization conflicts on `dev` before branching.
 - Never develop a feature directly on `main` or `dev`.

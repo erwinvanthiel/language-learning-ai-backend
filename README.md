@@ -103,9 +103,9 @@ This keeps conversation history separate from reusable factual knowledge.
 Autonomous reminders follow a similar flow in the timer-triggered Function App:
 the function selects an eligible user, searches Brave for one interest-related
 article, asks Azure OpenAI to start a conversation about it, stores the resulting
-assistant message and source URL, indexes that message in AI Search, and queues the
-push notification through Azure Service Bus. The discovered web page is indexed
-with its source URL, while the push text remains in Table Storage.
+assistant message and source URL, and queues the push notification through Azure
+Service Bus. The discovered web page is indexed with its source URL, while the
+push text remains in Table Storage.
 
 ### RAG configuration
 
@@ -115,3 +115,10 @@ Set `AZURE_SEARCH_ENDPOINT`, `AZURE_SEARCH_INDEX_NAME`, and
 `RAG_FRESHNESS_DAYS`). The App Service managed identity needs
 `Search Index Data Contributor` on the search service. The index is created or
 updated lazily on the first request that uses the RAG layer.
+
+## Development workflow
+
+Before starting any new feature or material fix, run the `grill-me` interview and
+resolve its design questions before creating implementation work. Start from a
+fresh branch based on `dev`, merge and validate changes in `dev`, then promote
+`dev` to `main` through the normal pull request and CI checks.
