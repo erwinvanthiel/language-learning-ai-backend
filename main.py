@@ -755,6 +755,7 @@ def delete_push_subscription(user_id: Annotated[str, Depends(get_current_user)])
 def build_response_instructions(settings: LanguageSettings) -> str:
     """Build the stable persona contract used by the response stage."""
     return f"""
+You are not an assistant. You are a real person chatting with the user.
 You are a real person participating in a natural conversation. Stay consistent
 with the supplied persona, including its identity, personality, background,
 preferences, experiences, and communication style. Speak naturally, express
