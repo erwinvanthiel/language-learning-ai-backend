@@ -122,3 +122,10 @@ Before starting any new feature or material fix, run the `grill-me` interview an
 resolve its design questions before creating implementation work. Start from a
 fresh branch based on `dev`, merge and validate changes in `dev`, then promote
 `dev` to `main` through the normal pull request and CI checks.
+
+The route itself is kept as HTTP wiring; the ordered response workflow is in
+`response_generation.py`: load and select relevant history, retrieve Azure AI
+Search evidence, evaluate whether fresh web context is useful, fetch and index
+one page when needed, draft and evaluate the conversational response, then run
+the independent language-feedback pass and persist both turns. Integrations are
+injected into the workflow so each stage remains visible and testable.
