@@ -950,7 +950,6 @@ def generate_conversation(
             user_id=user_id,
             request_context=request.context,
             settings=settings,
-            load_articles=get_article_context,
             load_history=get_conversation_history,
             select_history=_select_relevant_history,
             retrieve_knowledge=rag.retrieve,

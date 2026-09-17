@@ -82,8 +82,10 @@ for the Azure-side OIDC setup.
 ## Agentic response flow
 
 The response pipeline is intentionally split into bounded stages. `POST /generate`
-first loads the user's persisted conversation/article references and queries the
-Azure AI Search knowledge base with hybrid keyword + vector retrieval. Retrieved
+first loads the user's persisted conversation context and queries the Azure AI
+Search knowledge base with hybrid keyword + vector retrieval. Reminder article
+references are not injected directly; their content must be retrieved from the
+knowledge base. Retrieved
 chunks are deduplicated and capped by the evidence budget. A planning step then
 decides whether that evidence is sufficient. For factual or current questions it
 can invoke the registered `internet_search` skill (Brave), which returns at most
@@ -126,6 +128,7 @@ fresh branch based on `dev`, merge and validate changes in `dev`, then promote
 The route itself is kept as HTTP wiring; the ordered response workflow is in
 `response_generation.py`: load and select relevant history, retrieve Azure AI
 Search evidence, evaluate whether fresh web context is useful, fetch and index
-one page when needed, draft and evaluate the conversational response, then run
+one page only when the evidence is insufficient, retrieve that new evidence,
+draft and evaluate the conversational response, then run
 the independent language-feedback pass and persist both turns. Integrations are
 injected into the workflow so each stage remains visible and testable.

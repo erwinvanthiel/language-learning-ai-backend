@@ -16,7 +16,6 @@ from models import FeedbackAnnotation, LanguageSettings
 
 Trace = Callable[..., None]
 HistoryLoader = Callable[[str], list[dict[str, str]]]
-ArticleLoader = Callable[[str], list[dict[str, str]]]
 HistorySelector = Callable[[OpenAI, str, str, list[dict[str, str]], str], list[dict[str, str]]]
 SearchSelector = Callable[[OpenAI, str, dict[str, Any]], dict[str, Any]]
 Retriever = Callable[[str, str, OpenAI], list[dict[str, str]]]
@@ -34,7 +33,6 @@ def generate_response(
     user_id: str,
     request_context: dict[str, Any],
     settings: LanguageSettings,
-    load_articles: ArticleLoader,
     load_history: HistoryLoader,
     select_history: HistorySelector,
     retrieve_knowledge: Retriever,
@@ -52,10 +50,11 @@ def generate_response(
         message_text = json.dumps(request_context, ensure_ascii=False)
     trace_id = uuid4().hex
 
-    # Stage 1: load durable context and select only relevant conversation turns.
+    # Stage 1: load durable conversation context and select only relevant turns.
+    # Reminder articles are deliberately not loaded here: their reusable content
+    # is represented by Azure AI Search and must pass the RAG sufficiency check.
     history = load_history(user_id)
     history = select_history(client, deployment, message_text, history, trace_id)
-    articles = load_articles(user_id)
     generation_input: dict[str, Any] = {
         key: value for key, value in request_context.items()
         if key not in {"native_language", "learning_language"}
@@ -63,9 +62,6 @@ def generate_response(
     generation_input["trace_id"] = trace_id
     if history:
         generation_input["conversation_history"] = history
-    if articles:
-        generation_input["web_resources"] = articles
-
     # Stage 2: search the persistent knowledge base before considering the web.
     retrieval_query = message_text
     if history:
