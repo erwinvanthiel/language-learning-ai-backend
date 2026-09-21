@@ -540,6 +540,8 @@ def _evaluate_context_need(client: OpenAI, deployment: str, generation_input: di
                 "verifiable, or otherwise factual information that is missing, stale, or insufficient in "
                 "knowledge_context. It is not required for greetings, opinions, creative writing, or casual "
                 "conversation. Do not infer a topic from a fixed list: apply the same reasoning to every topic. "
+                "Follow any selected skill instructions when deciding what evidence is needed and how to "
+                "formulate the query. Prefer a precise query grounded in the conversation over a broad topic query. "
                 'Return only JSON: {"needs_context": true|false, "query": "focused search query"}. '
                 "If needs_context is false, query must be empty."
             ),
