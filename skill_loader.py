@@ -14,7 +14,6 @@ from openai import OpenAI, OpenAIError
 class ConversationSkill:
     name: str
     description: str
-    triggers: tuple[str, ...]
     requires_retrieval: bool
     instructions: str
 
@@ -36,11 +35,9 @@ def _parse_skill(path: Path) -> ConversationSkill:
     name = metadata.get("name", path.stem)
     if not re.fullmatch(r"[a-z][a-z0-9_-]{1,50}", name):
         raise ValueError(f"Invalid skill name: {name}")
-    triggers = tuple(item.strip().lower() for item in metadata.get("triggers", "").split(",") if item.strip())
     return ConversationSkill(
         name=name,
         description=metadata.get("description", ""),
-        triggers=triggers,
         requires_retrieval=metadata.get("requires_retrieval", "false").lower() == "true",
         instructions=instructions.strip(),
     )
@@ -55,12 +52,18 @@ def load_conversation_skills() -> tuple[ConversationSkill, ...]:
     return skills
 
 
-def _fallback_skill(message: str, skills: tuple[ConversationSkill, ...]) -> ConversationSkill:
-    lowered = message.lower()
+def retrieve_skill_candidates(
+    message: str, skills: tuple[ConversationSkill, ...], top_n: int = 3
+) -> tuple[ConversationSkill, ...]:
+    """Retrieve likely skills without embedding policy in the selector prompt."""
+    query_terms = set(re.findall(r"[a-z0-9]{3,}", message.lower()))
+    scored = []
     for skill in skills:
-        if any(trigger in lowered for trigger in skill.triggers):
-            return skill
-    return next((skill for skill in skills if skill.name == "general-conversation"), skills[0])
+        text = f"{skill.name} {skill.description} {skill.instructions}".lower()
+        score = sum(1 for term in query_terms if term in text)
+        scored.append((score, skill.name, skill))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return tuple(item[2] for item in scored[:max(1, top_n)])
 
 
 def select_conversation_skill(
@@ -68,31 +71,32 @@ def select_conversation_skill(
     deployment: str,
     message: str,
     trace: Callable[..., None] | None = None,
-) -> ConversationSkill:
-    """Select one skill from metadata without changing persona or tone rules."""
+) -> ConversationSkill | None:
+    """Retrieve candidate skills, then let the LLM choose one or choose none."""
     skills = load_conversation_skills()
+    candidates = retrieve_skill_candidates(message, skills)
     metadata = [
         {
             "name": skill.name,
             "description": skill.description,
-            "triggers": skill.triggers,
             "requires_retrieval": skill.requires_retrieval,
+            "instructions": skill.instructions,
         }
-        for skill in skills
+        for skill in candidates
     ]
     try:
         result = client.responses.create(
             model=deployment,
             instructions=(
-                "Select the best conversation skill using only the supplied metadata. "
-                "Do not write a response and do not infer a skill that is not listed. "
-                'Return only JSON: {"skill": "skill-name"}.'
+                "Decide whether one candidate skill is specifically needed for the user message. "
+                "Use only the candidate metadata and instructions. If no skill applies, choose none. "
+                'Return only JSON: {"skill": "skill-name" or null}.'
             ),
             input=json.dumps({"message": message, "skills": metadata}, ensure_ascii=False),
             max_output_tokens=80,
         )
         selected_name = json.loads(result.output_text).get("skill")
-        selected = next((skill for skill in skills if skill.name == selected_name), None)
+        selected = next((skill for skill in candidates if skill.name == selected_name), None)
         if selected:
             if trace:
                 trace("conversation_skill_selected", response={"skill": selected.name})
@@ -100,7 +104,6 @@ def select_conversation_skill(
     except (OpenAIError, TypeError, ValueError, json.JSONDecodeError):
         if trace:
             trace("conversation_skill_selection_failed")
-    selected = _fallback_skill(message, skills)
     if trace:
-        trace("conversation_skill_selected", response={"skill": selected.name, "fallback": True})
-    return selected
+        trace("conversation_skill_selected", response={"skill": None})
+    return None

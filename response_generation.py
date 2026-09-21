@@ -22,7 +22,7 @@ SearchSelector = Callable[[OpenAI, str, dict[str, Any]], dict[str, Any]]
 Retriever = Callable[[str, str, OpenAI], list[dict[str, str]]]
 Indexer = Callable[[dict[str, str], str, OpenAI], bool]
 AgentRunner = Callable[[OpenAI, str, str, dict[str, Any]], tuple[str, bool]]
-InstructionBuilder = Callable[[LanguageSettings, ConversationSkill], str]
+InstructionBuilder = Callable[[LanguageSettings, ConversationSkill | None], str]
 SkillSelector = Callable[[OpenAI, str, str, Callable[..., None] | None], ConversationSkill]
 FeedbackGenerator = Callable[[OpenAI, str, str, str, str], list[FeedbackAnnotation]]
 MessageWriter = Callable[..., None]
@@ -67,7 +67,10 @@ def generate_response(
     trace(
         "conversation_skill_ready",
         trace_id,
-        response={"name": selected_skill.name, "requires_retrieval": selected_skill.requires_retrieval},
+        response={
+            "name": selected_skill.name if selected_skill else None,
+            "requires_retrieval": selected_skill.requires_retrieval if selected_skill else False,
+        },
     )
     generation_input: dict[str, Any] = {
         key: value for key, value in request_context.items()
@@ -76,12 +79,13 @@ def generate_response(
     generation_input["trace_id"] = trace_id
     if history:
         generation_input["conversation_history"] = history
-    generation_input["conversation_skill"] = {
-        "name": selected_skill.name,
-        "instructions": selected_skill.instructions,
-    }
+    if selected_skill:
+        generation_input["conversation_skill"] = {
+            "name": selected_skill.name,
+            "instructions": selected_skill.instructions,
+        }
     web_context = None
-    if selected_skill.requires_retrieval:
+    if selected_skill and selected_skill.requires_retrieval:
         # Stage 2: only retrieval-enabled skills query persistent knowledge.
         retrieval_query = message_text
         if history:
