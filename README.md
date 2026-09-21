@@ -129,6 +129,13 @@ The route itself is kept as HTTP wiring; the ordered response workflow is in
 `response_generation.py`: load and select relevant history, retrieve Azure AI
 Search evidence, evaluate whether fresh web context is useful, fetch and index
 one page only when the evidence is insufficient, retrieve that new evidence,
-draft and evaluate the conversational response, then run
+select a conversation skill from the Markdown contracts in `skills/`, draft and
+evaluate the conversational response, then run
 the independent language-feedback pass and persist both turns. Integrations are
 injected into the workflow so each stage remains visible and testable.
+
+Conversation skills use Markdown front matter (`name`, `description`, `triggers`,
+and `requires_retrieval`) plus an instruction body. The selector chooses from
+those metadata records for each message. A skill may control the response task
+and whether retrieval is needed, but never overrides the general persona or
+conversation tone. Language corrections remain a separate, unchanged stage.

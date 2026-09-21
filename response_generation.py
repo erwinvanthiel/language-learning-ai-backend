@@ -12,6 +12,7 @@ from uuid import uuid4
 from openai import OpenAI
 
 from models import FeedbackAnnotation, LanguageSettings
+from skill_loader import ConversationSkill
 
 
 Trace = Callable[..., None]
@@ -21,7 +22,8 @@ SearchSelector = Callable[[OpenAI, str, dict[str, Any]], dict[str, Any]]
 Retriever = Callable[[str, str, OpenAI], list[dict[str, str]]]
 Indexer = Callable[[dict[str, str], str, OpenAI], bool]
 AgentRunner = Callable[[OpenAI, str, str, dict[str, Any]], tuple[str, bool]]
-InstructionBuilder = Callable[[LanguageSettings], str]
+InstructionBuilder = Callable[[LanguageSettings, ConversationSkill], str]
+SkillSelector = Callable[[OpenAI, str, str, Callable[..., None] | None], ConversationSkill]
 FeedbackGenerator = Callable[[OpenAI, str, str, str, str], list[FeedbackAnnotation]]
 MessageWriter = Callable[..., None]
 
@@ -34,6 +36,7 @@ def generate_response(
     request_context: dict[str, Any],
     settings: LanguageSettings,
     load_history: HistoryLoader,
+    select_skill: SkillSelector,
     select_history: HistorySelector,
     retrieve_knowledge: Retriever,
     select_search: SearchSelector,
@@ -55,6 +58,17 @@ def generate_response(
     # is represented by Azure AI Search and must pass the RAG sufficiency check.
     history = load_history(user_id)
     history = select_history(client, deployment, message_text, history, trace_id)
+    selected_skill = select_skill(
+        client,
+        deployment,
+        message_text,
+        lambda event, **details: trace(event, trace_id, **details),
+    )
+    trace(
+        "conversation_skill_ready",
+        trace_id,
+        response={"name": selected_skill.name, "requires_retrieval": selected_skill.requires_retrieval},
+    )
     generation_input: dict[str, Any] = {
         key: value for key, value in request_context.items()
         if key not in {"native_language", "learning_language"}
@@ -62,36 +76,42 @@ def generate_response(
     generation_input["trace_id"] = trace_id
     if history:
         generation_input["conversation_history"] = history
-    # Stage 2: search the persistent knowledge base before considering the web.
-    retrieval_query = message_text
-    if history:
-        retrieval_query = "\n".join(
-            f"{turn['role']}: {turn['text']}" for turn in history[-4:]
-        ) + f"\nuser: {message_text}"
-    knowledge = retrieve_knowledge(retrieval_query, user_id, client)
-    trace("knowledge_retrieval_completed", trace_id, prompt=retrieval_query, response=knowledge)
-    if knowledge:
-        generation_input["knowledge_context"] = knowledge
+    generation_input["conversation_skill"] = {
+        "name": selected_skill.name,
+        "instructions": selected_skill.instructions,
+    }
+    web_context = None
+    if selected_skill.requires_retrieval:
+        # Stage 2: only retrieval-enabled skills query persistent knowledge.
+        retrieval_query = message_text
+        if history:
+            retrieval_query = "\n".join(
+                f"{turn['role']}: {turn['text']}" for turn in history[-4:]
+            ) + f"\nuser: {message_text}"
+        knowledge = retrieve_knowledge(retrieval_query, user_id, client)
+        trace("knowledge_retrieval_completed", trace_id, prompt=retrieval_query, response=knowledge)
+        if knowledge:
+            generation_input["knowledge_context"] = knowledge
 
-    # Stage 3: evaluate whether fresh factual context would help, then retrieve
-    # at most one web page and index it for future conversations.
-    generation_input = select_search(client, deployment, generation_input)
-    web_context = generation_input.get("skill_results", {}).get("internet_search")
-    if web_context:
-        trace("web_search_requested", trace_id, prompt=message_text, response=web_context)
-        indexed = index_page(web_context[0], user_id, client)
-        trace("web_page_indexed", trace_id, response=indexed)
-        if indexed:
-            refreshed = retrieve_knowledge(retrieval_query, user_id, client)
-            if refreshed:
-                generation_input["knowledge_context"] = refreshed
+        # Stage 3: evaluate whether fresh factual context would help, then retrieve
+        # at most one web page and index it for future conversations.
+        generation_input = select_search(client, deployment, generation_input)
+        web_context = generation_input.get("skill_results", {}).get("internet_search")
+        if web_context:
+            trace("web_search_requested", trace_id, prompt=message_text, response=web_context)
+            indexed = index_page(web_context[0], user_id, client)
+            trace("web_page_indexed", trace_id, response=indexed)
+            if indexed:
+                refreshed = retrieve_knowledge(retrieval_query, user_id, client)
+                if refreshed:
+                    generation_input["knowledge_context"] = refreshed
 
     # Stage 4: persist the user turn before generating the answer.
     write_message(user_id, message_text, "user", web_context=web_context)
 
     # Stage 5: draft and evaluate the natural conversational response.
     response_text, structured = run_agent(
-        client, deployment, build_instructions(settings), generation_input
+        client, deployment, build_instructions(settings, selected_skill), generation_input
     )
 
     # Stage 6: independently annotate language-learning mistakes.
