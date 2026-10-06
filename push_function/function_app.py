@@ -12,7 +12,6 @@ from azure.servicebus import ServiceBusClient, ServiceBusMessage
 from openai import OpenAI
 from pywebpush import WebPushException, webpush
 import httpx
-from rag import index_push_message
 
 
 REMINDER = "I’m here whenever you’re ready to practise."
@@ -164,7 +163,6 @@ def enqueue_reminders(_: func.TimerRequest) -> None:
                         "ArticleSnippet": article["snippet"],
                     }
                 )
-                index_push_message(body, user["RowKey"], article["url"], article["name"], article["snippet"])
                 sender.send_messages(ServiceBusMessage(json.dumps(payload)))
                 user["LastStandardPushAt"] = now.isoformat()
                 users.upsert_entity(user, mode=UpdateMode.REPLACE)

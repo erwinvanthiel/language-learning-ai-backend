@@ -318,11 +318,6 @@ def fetch_and_index(result: dict[str, str], owner_id: str, openai_client: Any) -
         return []
 
 
-def index_message(text: str, owner_id: str, openai_client: Any, source_url: str = "") -> None:
-    title = "Conversation message"
-    index_document(text, owner_id, source_url or f"conversation://{owner_id}", title, "push" if source_url else "conversation", openai_client)
-
-
 def delete_owner_documents(owner_id: str) -> int:
     """Delete all private conversation and push evidence for one user."""
     if not _configured():

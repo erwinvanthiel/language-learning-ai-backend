@@ -82,8 +82,10 @@ for the Azure-side OIDC setup.
 ## Agentic response flow
 
 The response pipeline is intentionally split into bounded stages. `POST /generate`
-first loads the user's persisted conversation/article references and queries the
-Azure AI Search knowledge base with hybrid keyword + vector retrieval. Retrieved
+first loads the user's persisted conversation context and queries the Azure AI
+Search knowledge base with hybrid keyword + vector retrieval. Reminder article
+references are not injected directly; their content must be retrieved from the
+knowledge base. Retrieved
 chunks are deduplicated and capped by the evidence budget. A planning step then
 decides whether that evidence is sufficient. For factual or current questions it
 can invoke the registered `internet_search` skill (Brave), which returns at most
@@ -97,21 +99,44 @@ chat model and the web-search skill. Its draft is evaluated against a response
 quality check and revised at most once. Language corrections are a separate pass:
 they annotate only genuine mistakes in the learning language and do not change the
 natural response. User and assistant messages are persisted in Azure Table Storage
-and indexed best-effort in the same AI Search index, so a Search outage does not
-prevent normal chat storage.
+and remain in Table Storage; only fetched web documents are indexed in AI Search.
+This keeps conversation history separate from reusable factual knowledge.
 
 Autonomous reminders follow a similar flow in the timer-triggered Function App:
 the function selects an eligible user, searches Brave for one interest-related
 article, asks Azure OpenAI to start a conversation about it, stores the resulting
-assistant message and source URL, indexes that message in AI Search, and queues the
-push notification through Azure Service Bus. Because the push text and source are
-indexed, later conversations can retrieve and discuss what was previously sent.
+assistant message and source URL, and queues the push notification through Azure
+Service Bus. The discovered web page is indexed with its source URL, while the
+push text remains in Table Storage.
 
 ### RAG configuration
 
 Set `AZURE_SEARCH_ENDPOINT`, `AZURE_SEARCH_INDEX_NAME`, and
 `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` (plus the optional
 `AZURE_OPENAI_EMBEDDING_DIMENSIONS`, `RAG_TOP_K`, `RAG_EVIDENCE_BUDGET_CHARS`, and
-`RAG_FRESHNESS_DAYS`). The App Service and Function App managed identities need
+`RAG_FRESHNESS_DAYS`). The App Service managed identity needs
 `Search Index Data Contributor` on the search service. The index is created or
 updated lazily on the first request that uses the RAG layer.
+
+## Development workflow
+
+Before starting any new feature or material fix, run the `grill-me` interview and
+resolve its design questions before creating implementation work. Start from a
+fresh branch based on `dev`, merge and validate changes in `dev`, then promote
+`dev` to `main` through the normal pull request and CI checks.
+
+The route itself is kept as HTTP wiring; the ordered response workflow is in
+`response_generation.py`: load and select relevant history, retrieve Azure AI
+Search evidence, evaluate whether fresh web context is useful, fetch and index
+one page only when the evidence is insufficient, retrieve that new evidence,
+select a conversation skill from the Markdown contracts in `skills/`, draft and
+evaluate the conversational response, then run
+the independent language-feedback pass and persist both turns. Integrations are
+injected into the workflow so each stage remains visible and testable.
+
+Conversation skills use Markdown front matter (`name`, `description`, and
+`requires_retrieval`) plus an instruction body. The system retrieves a small
+candidate set from the skill descriptions/instructions, then asks the LLM to
+choose a specific skill or none. A skill may control the response task and
+whether retrieval is needed, but never overrides the general persona or
+conversation tone. Language corrections remain a separate, unchanged stage.
