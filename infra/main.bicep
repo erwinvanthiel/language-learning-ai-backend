@@ -7,11 +7,12 @@ param openAiLocation string = 'swedencentral'
 param apiName string = 'language-learning-ai-api-evth'
 param apiDevName string = 'language-learning-ai-api-dev-evth'
 param translateName string = 'language-learning-ai-translate-evth'
+param translateDockerImage string = 'libretranslate/libretranslate:latest'
 param staticWebName string = 'language-learning-ai-web-evth'
 param remindersName string = 'language-learning-ai-reminders-evth'
 param remindersDevName string = 'language-learning-ai-reminders-dev-evth'
 param appPlanName string = 'language-learning-ai-plan'
-param functionPlanName string = 'languagelearningairg-flex'
+param functionPlanName string = 'ASP-languagelearningairg-0471'
 param storageName string = 'languageaistorageevth'
 param openAiName string = 'language-learning-ai-openai-evth'
 param searchName string = 'language-learning-ai-search-evth'
@@ -30,7 +31,7 @@ resource appPlan 'Microsoft.Web/serverfarms@2023-12-01' = {
   }
 }
 
-resource api 'Microsoft.Web/sites@2023-12-01' = [for name in [apiName, apiDevName, translateName]: {
+resource api 'Microsoft.Web/sites@2023-12-01' = [for name in [apiName, apiDevName]: {
   name: name
   location: location
   kind: 'app,linux'
@@ -45,6 +46,21 @@ resource api 'Microsoft.Web/sites@2023-12-01' = [for name in [apiName, apiDevNam
     }
   }
 }]
+
+resource translate 'Microsoft.Web/sites@2023-12-01' = {
+  name: translateName
+  location: location
+  kind: 'app,linux,container'
+  identity: { type: 'SystemAssigned' }
+  properties: {
+    serverFarmId: appPlan.id
+    httpsOnly: true
+    siteConfig: {
+      linuxFxVersion: 'DOCKER|${translateDockerImage}'
+      minTlsVersion: '1.2'
+    }
+  }
+}
 
 resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: storageName
