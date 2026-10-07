@@ -52,12 +52,27 @@ jobs:
           from zipfile import ZIP_DEFLATED, ZipFile
 
           root = Path("push_function")
-          with ZipFile("push_function.zip", "w", ZIP_DEFLATED) as archive:
+          with ZipFile("released-package.zip", "w", ZIP_DEFLATED) as archive:
               for path in root.rglob("*"):
                   if path.is_file():
                       archive.write(path, path.relative_to(root))
           PY
-      - name: Deploy to Flex Consumption Function App
+      - name: Deploy package to Flex Consumption Function App
         env:
           FUNCTION_APP: ${{ github.ref_name == 'main' && vars.AZURE_FUNCTION_APP_NAME || vars.AZURE_DEV_FUNCTION_APP_NAME }}
-        run: az functionapp deployment source config-zip --resource-group "$RESOURCE_GROUP" --name "$FUNCTION_APP" --src push_function.zip
+          STORAGE_ACCOUNT: languageaistorageevth
+        run: |
+          storage_key=$(az storage account keys list --resource-group "$RESOURCE_GROUP" --account-name "$STORAGE_ACCOUNT" --query '[0].value' -o tsv)
+          container_name=$(echo "$FUNCTION_APP" | tr -d '-' | tr '[:upper:]' '[:lower:]')
+          az storage container create --name "$container_name" --account-name "$STORAGE_ACCOUNT" --account-key "$storage_key" -o none
+          az storage blob upload --account-name "$STORAGE_ACCOUNT" --account-key "$storage_key" \
+            --container-name "$container_name" --name released-package.zip --file released-package.zip --overwrite -o none
+          expiry=$(date -u -d '+1 hour' '+%Y-%m-%dT%H:%MZ')
+          sas=$(az storage blob generate-sas --account-name "$STORAGE_ACCOUNT" --account-key "$storage_key" \
+            --container-name "$container_name" --name released-package.zip --permissions r --expiry "$expiry" -o tsv)
+          subscription_id=$(az account show --query id -o tsv)
+          package_uri="https://${STORAGE_ACCOUNT}.blob.core.windows.net/${container_name}/released-package.zip?${sas}"
+          az rest --method put \
+            --url "https://management.azure.com/subscriptions/${subscription_id}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.Web/sites/${FUNCTION_APP}/extensions/onedeploy?api-version=2024-04-01" \
+            --body "{\"properties\":{\"packageUri\":\"${package_uri}\",\"remoteBuild\":false}}" \
+            --headers Content-Type=application/json
