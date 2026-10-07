@@ -113,4 +113,4 @@ jobs:
           az webapp config set --resource-group language-learning-ai-rg --name "$APP_NAME" \
             --startup-file 'PYTHONPATH=/home/site/wwwroot/.python_packages/lib/site-packages python -m uvicorn main:app --host 0.0.0.0 --port 8000' -o none
           az webapp deploy --resource-group language-learning-ai-rg --name "$APP_NAME" \
-            --src-path app-package.zip --type zip --async true --clean true
+            --src-path app-package.zip --type zip --async true --track-status false --clean true
