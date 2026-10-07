@@ -71,12 +71,13 @@ jobs:
             --python-version "${PYTHON_VERSION}" \
             --only-binary=:all: \
             --target deployment/.python_packages/lib/site-packages
+          (cd deployment && zip -qr ../app-package.zip .)
 
       - name: Upload deployment package
         uses: actions/upload-artifact@v4
         with:
           name: app-package
-          path: deployment
+          path: app-package.zip
           if-no-files-found: error
           retention-days: 1
           include-hidden-files: true
@@ -87,7 +88,6 @@ jobs:
     timeout-minutes: 15
     environment:
       name: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
-      url: ${{ steps.deploy.outputs.webapp-url }}
     permissions:
       contents: read
       id-token: write
@@ -97,7 +97,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: app-package
-          path: deployment
+          path: .
 
       - name: Sign in to Azure with OIDC
         uses: azure/login@v3
@@ -107,9 +107,10 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Deploy to Azure App Service
-        id: deploy
-        uses: azure/webapps-deploy@v3
-        with:
-          app-name: ${{ github.ref_name == 'main' && vars.AZURE_WEBAPP_NAME || vars.AZURE_DEV_WEBAPP_NAME }}
-          package: deployment
-          startup-command: PYTHONPATH=/home/site/wwwroot/.python_packages/lib/site-packages python -m uvicorn main:app --host 0.0.0.0 --port 8000
+        env:
+          APP_NAME: ${{ github.ref_name == 'main' && vars.AZURE_WEBAPP_NAME || vars.AZURE_DEV_WEBAPP_NAME }}
+        run: |
+          az webapp config set --resource-group language-learning-ai-rg --name "$APP_NAME" \
+            --startup-file 'PYTHONPATH=/home/site/wwwroot/.python_packages/lib/site-packages python -m uvicorn main:app --host 0.0.0.0 --port 8000' -o none
+          az webapp deploy --resource-group language-learning-ai-rg --name "$APP_NAME" \
+            --src-path app-package.zip --type zip --async true --clean true
