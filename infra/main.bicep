@@ -4,6 +4,8 @@ targetScope = 'resourceGroup'
 param location string = resourceGroup().location
 @description('Azure region for the Azure OpenAI account.')
 param openAiLocation string = 'swedencentral'
+@description('Restore the soft-deleted Azure OpenAI account with the same name.')
+param restoreOpenAi bool = true
 param apiName string = 'language-learning-ai-api-evth'
 param apiDevName string = 'language-learning-ai-api-dev-evth'
 param translateName string = 'language-learning-ai-translate-evth'
@@ -114,6 +116,7 @@ resource openAi 'Microsoft.CognitiveServices/accounts@2023-05-01' = {
   properties: {
     customSubDomainName: openAiName
     publicNetworkAccess: 'Enabled'
+    restore: restoreOpenAi
   }
 }
 
