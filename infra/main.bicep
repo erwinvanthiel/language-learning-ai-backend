@@ -81,6 +81,11 @@ resource tableService 'Microsoft.Storage/storageAccounts/tableServices@2023-05-0
   parent: storage
 }
 
+resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' = {
+  name: 'default'
+  parent: storage
+}
+
 resource usersTable 'Microsoft.Storage/storageAccounts/tableServices/tables@2023-05-01' = {
   name: 'Users'
   parent: tableService
@@ -147,6 +152,12 @@ resource functionPlan 'Microsoft.Web/serverfarms@2023-12-01' = {
   properties: { reserved: true }
 }
 
+resource functionDeploymentContainers 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = [for name in [remindersName, remindersDevName]: {
+  name: toLower(replace(name, '-', ''))
+  parent: blobService
+  properties: { publicAccess: 'None' }
+}]
+
 resource reminderApp 'Microsoft.Web/sites@2023-12-01' = [for name in [remindersName, remindersDevName]: {
   name: name
   location: location
@@ -156,14 +167,41 @@ resource reminderApp 'Microsoft.Web/sites@2023-12-01' = [for name in [remindersN
     serverFarmId: functionPlan.id
     httpsOnly: true
     siteConfig: {
-      linuxFxVersion: 'Python|3.12'
       appSettings: [
-        { name: 'FUNCTIONS_EXTENSION_VERSION', value: '~4' }
-        { name: 'FUNCTIONS_WORKER_RUNTIME', value: 'python' }
         { name: 'SERVICE_BUS_NAMESPACE', value: serviceBus.name }
         { name: 'SERVICE_BUS_QUEUE', value: remindersQueue.name }
       ]
     }
+    functionAppConfig: {
+      deployment: {
+        storage: {
+          type: 'blobContainer'
+          value: 'https://${storage.name}.blob.${environment().suffixes.storage}/${toLower(replace(name, '-', ''))}'
+          authentication: {
+            type: 'SystemAssignedIdentity'
+          }
+        }
+      }
+      runtime: {
+        name: 'python'
+        version: '3.12'
+      }
+      scaleAndConcurrency: {
+        maximumInstanceCount: 100
+        instanceMemoryMB: 2048
+        alwaysReady: []
+      }
+    }
+  }
+}]
+
+resource functionStorageRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = [for (name, i) in [remindersName, remindersDevName]: {
+  name: guid(storage.id, name, 'Storage Blob Data Owner')
+  scope: storage
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'b7e6dc6d-f1e8-4753-8033-0f276bb0955b')
+    principalId: reminderApp[i].identity.principalId
+    principalType: 'ServicePrincipal'
   }
 }]
 
