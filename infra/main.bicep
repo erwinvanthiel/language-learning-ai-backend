@@ -168,6 +168,7 @@ resource reminderApp 'Microsoft.Web/sites@2023-12-01' = [for name in [remindersN
     httpsOnly: true
     siteConfig: {
       appSettings: [
+        { name: 'AzureWebJobsStorage', value: storage.listKeys().keys[0].value }
         { name: 'SERVICE_BUS_NAMESPACE', value: serviceBus.name }
         { name: 'SERVICE_BUS_QUEUE', value: remindersQueue.name }
       ]
